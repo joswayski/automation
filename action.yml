@@ -1,0 +1,21 @@
+name: Amp CI repair
+description: Investigate trusted failed runs in an Amp orb, with durable attempt tracking and PR-only repairs.
+inputs:
+  github-token:
+    description: Caller GITHUB_TOKEN with actions/read, contents/read, pull-requests/read and issues/write.
+    required: true
+  amp-api-key:
+    description: Amp access token from Settings > Security, not a CLI session token.
+    required: false
+  enabled:
+    description: Explicit opt-in. Only the literal true enables repairs.
+    default: "false"
+  dry-run:
+    description: Evaluate eligibility without creating an issue, installing Amp, or launching an orb.
+    default: "false"
+  daily-limit:
+    description: Maximum reservations per repository in a rolling 24 hours (1–10).
+    default: "3"
+runs:
+  using: node24
+  main: src/main.mjs

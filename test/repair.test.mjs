@@ -1,0 +1,379 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { repair } from "../src/repair.mjs";
+import { GitHub } from "../src/github.mjs";
+import { listener } from "../scripts/listener.mjs";
+import repositories from "../src/repositories.json" with { type: "json" };
+
+const sha = "0123456789abcdef0123456789abcdef01234567";
+const otherSha = "fedcba9876543210fedcba9876543210fedcba98";
+const threadURL = "https://ampcode.com/threads/T-12345678-1234-1234-1234-123456789012";
+const now = new Date("2026-10-10T16:00:00Z");
+
+function harness(repo = "joswayski/caper") {
+  const state = {
+    repository: { id: 42, full_name: repo, default_branch: "main" },
+    run: {
+      id: 123,
+      run_attempt: 2,
+      path: ".github/workflows/ci.yml",
+      name: "CI",
+      event: "push",
+      head_branch: "main",
+      head_sha: sha,
+      head_repository: { id: 42, full_name: repo },
+      status: "completed",
+      conclusion: "failure",
+    },
+    head: sha,
+    jobs: [{ id: 9, conclusion: "failure", steps: [] }],
+    issues: [],
+    comments: [],
+    prs: [],
+    labels: [],
+    launches: [],
+    writes: [],
+    failIssueCreate: false,
+    failIssueUpdate: false,
+    launchError: false,
+  };
+  const options = {
+    event: {
+      action: "completed",
+      repository: { ...state.repository },
+      workflow_run: { id: 123, run_attempt: 2 },
+    },
+    eventName: "workflow_run",
+    repo,
+    enabled: "true",
+    dailyLimit: "3",
+    ampKey: "sgamp_test-only-not-a-real-token",
+  };
+  const request = async (urlString, init) => {
+    const url = new URL(urlString);
+    const path = url.pathname.replace(`/repos/${repo}`, "");
+    const body = init.body && JSON.parse(init.body);
+    const json = (value, status = 200) => Response.json(value, { status });
+    const page = (items) =>
+      items.slice(
+        (Number(url.searchParams.get("page")) - 1) * 100,
+        Number(url.searchParams.get("page")) * 100,
+      );
+    if (init.method === "GET") {
+      if (path === "") return json(state.repository);
+      if (path === `/actions/runs/${state.run.id}`) return json(state.run);
+      if (path === `/actions/runs/${state.run.id}/attempts/${state.run.run_attempt}/jobs`)
+        return json({ jobs: page(state.jobs) });
+      if (path === "/git/ref/heads/main") return json({ object: { sha: state.head } });
+      if (path === "/issues") return json(page(state.issues));
+      if (path === "/pulls") return json(page(state.prs));
+      if (path === "/labels/amp-ci-repair")
+        return state.labels.length ? json(state.labels[0]) : json({}, 404);
+    }
+    state.writes.push({ path, method: init.method, body });
+    if (path === "/labels" && init.method === "POST") {
+      state.labels.push(body);
+      return json(body, 201);
+    }
+    if (path === "/issues" && init.method === "POST") {
+      if (state.failIssueCreate) return json({ message: "private diagnostic must not leak" }, 403);
+      const issue = {
+        ...body,
+        number: state.issues.length + 1,
+        state: "open",
+        user: { login: "github-actions[bot]" },
+        created_at: now.toISOString(),
+      };
+      state.issues.push(issue);
+      return json(issue, 201);
+    }
+    if (path.endsWith("/comments") && init.method === "POST") {
+      if (state.failIssueUpdate) return json({}, 503);
+      state.comments.push(body);
+      return json(body, 201);
+    }
+    throw new Error(`Unexpected HTTP request: ${init.method} ${path}`);
+  };
+  const dependencies = {
+    github: new GitHub("test-github-token", request),
+    now,
+    launch: async (request) => {
+      state.launches.push(request);
+      // Model a lost response after Amp has accepted the request.
+      if (state.launchError) throw new Error("sensitive subprocess output");
+      return threadURL;
+    },
+  };
+  return { state, options, run: () => repair(options, dependencies) };
+}
+
+test("a failed attempt creates a durable issue and launches the exact Amp project, then suppresses reruns and sibling workflows", async () => {
+  const h = harness();
+  assert.deepEqual(await h.run(), { status: "launched", issue: 1, threadURL });
+  assert.match(h.state.issues[0].body, /attempts\/2/);
+  assert.match(h.state.comments[0].body, /Status: \*\*launched\*\*/);
+  assert.match(h.state.comments[0].body, /ampcode.com\/threads/);
+  assert.equal(h.state.launches[0].project, "josevalerio/caper");
+  assert.match(
+    h.state.launches[0].prompt,
+    /PR marker: <!-- amp-ci-repair:v1 0123456789abcdef0123456789abcdef01234567 -->/,
+  );
+  h.state.issues[0].state = "closed";
+  h.state.run.run_attempt = 3;
+  h.options.event.workflow_run.run_attempt = 3;
+  assert.equal((await h.run()).status, "skipped");
+  h.state.run.id = 124;
+  h.options.event.workflow_run.id = 124;
+  h.state.run.path = ".github/workflows/native.yml";
+  h.state.run.name = "Native development builds";
+  assert.equal((await h.run()).status, "skipped");
+  assert.equal(h.state.launches.length, 1);
+  assert.equal(h.state.issues.length, 1);
+});
+
+test("cancellation with a failed step launches, but ordinary cancellations and successful continue-on-error workflows do not", async () => {
+  for (const [conclusion, step, expected] of [
+    ["cancelled", "failure", "launched"],
+    ["cancelled", "timed_out", "launched"],
+    ["cancelled", "cancelled", "skipped"],
+    ["cancelled", "success", "skipped"],
+    ["success", "failure", "skipped"],
+  ]) {
+    const h = harness();
+    h.state.run.conclusion = conclusion;
+    h.state.jobs = [{ conclusion: "cancelled", steps: [{ conclusion: step }] }];
+    assert.equal((await h.run()).status, expected, `${conclusion}/${step}`);
+    assert.equal(h.state.launches.length, expected === "launched" ? 1 : 0);
+  }
+});
+
+test("only enrolled, trusted main completions and the latest attempt are eligible", async (t) => {
+  const cases = {
+    disabled: (h) => {
+      h.options.enabled = "false";
+    },
+    "fork caller": (h) => {
+      h.options.repo = "attacker/caper";
+    },
+    "PR trigger": (h) => {
+      h.options.eventName = "pull_request";
+    },
+    "running event": (h) => {
+      h.options.event.action = "in_progress";
+    },
+    "wrong repository": (h) => {
+      h.options.event.repository.id = 43;
+    },
+    "branch renamed": (h) => {
+      h.state.repository.default_branch = "other";
+    },
+    "fork source": (h) => {
+      h.state.run.head_repository = { id: 43, full_name: "attacker/caper" };
+    },
+    "different repo ID": (h) => {
+      h.state.run.head_repository.id = 43;
+    },
+    "feature branch": (h) => {
+      h.state.run.head_branch = "feature";
+    },
+    "pull request source": (h) => {
+      h.state.run.event = "pull_request";
+    },
+    "scheduled source": (h) => {
+      h.state.run.event = "schedule";
+    },
+    "unapproved chain": (h) => {
+      h.state.run.event = "workflow_run";
+    },
+    "lookalike name": (h) => {
+      h.state.run.path = ".github/workflows/untrusted.yml";
+    },
+    "renamed workflow": (h) => {
+      h.state.run.name = "Something else";
+    },
+    "incomplete run": (h) => {
+      h.state.run.status = "in_progress";
+    },
+    "already successful": (h) => {
+      h.state.run.conclusion = "success";
+    },
+    "stale attempt": (h) => {
+      h.state.run.run_attempt++;
+    },
+    "superseded push": (h) => {
+      h.state.head = otherSha;
+    },
+  };
+  for (const [name, modify] of Object.entries(cases))
+    await t.test(name, async () => {
+      const h = harness();
+      modify(h);
+      assert.equal((await h.run()).status, "skipped");
+      assert.deepEqual(h.state.writes, []);
+      assert.deepEqual(h.state.launches, []);
+    });
+});
+
+test("different deployments at the same infrastructure SHA have separate reservations", async () => {
+  const h = harness("joswayski/infrastructure");
+  Object.assign(h.state.run, {
+    path: ".github/workflows/deploy-caper-web.yml",
+    name: "Deploy Caper web",
+    event: "workflow_dispatch",
+  });
+  h.state.head = otherSha; // Deploys can commit an image pin before their run completes.
+  assert.equal((await h.run()).status, "launched");
+  assert.equal(h.state.launches[0].project, "josevalerio/infrastructure");
+  assert.match(h.state.issues[0].body, /amp-ci-repair:v1 run-123/);
+  h.state.issues[0].state = "closed";
+  h.state.run.id = 124;
+  h.options.event.workflow_run.id = 124;
+  assert.equal((await h.run()).status, "launched");
+  assert.match(h.state.issues[1].body, /amp-ci-repair:v1 run-124/);
+});
+
+test("explicitly enrolled chained releases are supported without admitting arbitrary workflow_run sources", async () => {
+  const h = harness("joswayski/findanything");
+  Object.assign(h.state.run, {
+    path: ".github/workflows/native-release.yml",
+    name: "Native Preview release",
+    event: "workflow_run",
+  });
+  assert.equal((await h.run()).status, "launched");
+  assert.match(h.state.issues[0].body, /amp-ci-repair:v1 run-123/);
+});
+
+test("the rolling daily limit counts reservations, not just successful launches, with a strict 24-hour boundary", async () => {
+  const h = harness();
+  h.options.dailyLimit = "2";
+  for (let i = 0; i < 2; i++) {
+    h.state.run.head_sha = h.state.head = String(i + 1).repeat(40);
+    await h.run();
+    h.state.issues[i].state = "closed";
+  }
+  h.state.run.head_sha = h.state.head = sha;
+  assert.match((await h.run()).reason, /24-hour/);
+  h.state.issues[0].created_at = "2026-10-09T16:00:00.001Z";
+  assert.equal((await h.run()).status, "skipped");
+  h.state.issues[0].created_at = "2026-10-09T16:00:00.000Z";
+  assert.equal((await h.run()).status, "launched");
+});
+
+test("an open tracking issue pauses newer commits until reviewed; an open repair PR still blocks after issue closure", async () => {
+  const h = harness();
+  await h.run();
+  h.state.run.head_sha = h.state.head = otherSha;
+  assert.match((await h.run()).reason, /open tracking issue/);
+  h.state.issues[0].state = "closed";
+  h.state.prs = [{ head: { ref: `amp/ci-repair/${sha}` } }];
+  assert.match((await h.run()).reason, /repair PR/);
+  h.state.prs = [];
+  assert.equal((await h.run()).status, "launched");
+});
+
+test("a lost launch response cannot create a second agent and does not leak subprocess output", async () => {
+  const h = harness();
+  h.state.launchError = true;
+  await assert.rejects(h.run(), (error) => {
+    assert.match(error.message, /launch unconfirmed/);
+    assert.doesNotMatch(error.message, /sensitive/);
+    return true;
+  });
+  assert.match(h.state.comments[0].body, /launch unconfirmed/);
+  assert.equal((await h.run()).status, "skipped");
+  assert.equal(h.state.launches.length, 1);
+});
+
+test("failure to record the returned thread leaves the reservation, rather than relaunching", async () => {
+  const h = harness();
+  h.state.failIssueUpdate = true;
+  await assert.rejects(
+    h.run(),
+    /Thread created at https:\/\/ampcode.com\/threads\/T-12345678-1234-1234-1234-123456789012/,
+  );
+  assert.match(h.state.issues[0].body, /\*\*reserved\*\*/);
+  assert.equal((await h.run()).status, "skipped");
+  assert.equal(h.state.launches.length, 1);
+});
+
+test("failure to reserve prevents launch", async () => {
+  const h = harness();
+  h.state.failIssueCreate = true;
+  await assert.rejects(h.run(), (error) => {
+    assert.match(error.message, /403/);
+    assert.doesNotMatch(error.message, /private diagnostic/);
+    return true;
+  });
+  assert.deepEqual(h.state.launches, []);
+});
+
+test("dry run needs no Amp key and makes no writes or launches", async () => {
+  const h = harness();
+  h.options.dryRun = true;
+  h.options.ampKey = "";
+  assert.deepEqual(await h.run(), {
+    status: "would-launch",
+    project: "josevalerio/caper",
+    key: sha,
+    failedJobs: 1,
+  });
+  assert.deepEqual(h.state.writes, []);
+  assert.deepEqual(h.state.launches, []);
+});
+
+test("safety checks cover all pages of jobs, issues, and repair PRs", async () => {
+  const h = harness();
+  h.state.jobs = [
+    ...Array.from({ length: 100 }, () => ({ conclusion: "success" })),
+    { conclusion: "timed_out" },
+  ];
+  await h.run();
+  const reservation = h.state.issues[0];
+  const unrelated = Array.from({ length: 100 }, () => ({ body: "", user: { login: "someone" } }));
+  h.state.issues = [...unrelated, reservation];
+  assert.equal((await h.run()).status, "skipped");
+  reservation.state = "closed";
+  h.state.run.head_sha = h.state.head = otherSha;
+  h.state.prs = [
+    ...Array.from({ length: 100 }, () => ({ head: { ref: "unrelated" } })),
+    { head: { ref: "amp/ci-repair/previous" } },
+  ];
+  assert.match((await h.run()).reason, /repair PR/);
+  assert.equal(h.state.launches.length, 1);
+});
+
+test("missing credentials and invalid launch limits fail before reserving", async () => {
+  for (const changes of [
+    { ampKey: "" },
+    { ampKey: "session-token" },
+    { dailyLimit: "0" },
+    { dailyLimit: "11" },
+    { dailyLimit: "1.5" },
+    { dailyLimit: "NaN" },
+  ]) {
+    const h = harness();
+    Object.assign(h.options, changes);
+    await assert.rejects(h.run());
+    assert.deepEqual(h.state.writes, []);
+    assert.deepEqual(h.state.launches, []);
+  }
+});
+
+test("listeners pin one shared implementation and carry the serialization, permissions and opt-in contract for every enrolled repository", () => {
+  for (const [repo, policy] of Object.entries(repositories)) {
+    const yaml = listener(repo, sha);
+    assert.match(yaml, /uses: joswayski\/automation@0123456789abcdef0123456789abcdef01234567/);
+    assert.match(yaml, /group: amp-ci-repair\n  queue: max/);
+    assert.match(yaml, /enabled: \$\{\{ vars.AMP_REPAIR_ENABLED }}/);
+    assert.match(yaml, /amp-api-key: \$\{\{ secrets.AMP_API_KEY }}/);
+    assert.match(yaml, /issues: write/);
+    assert.doesNotMatch(
+      yaml,
+      /contents: write|pull-requests: write|actions\/checkout|secrets: inherit|workflow_dispatch:/,
+    );
+    for (const workflow of Object.values(policy.workflows))
+      assert.ok(yaml.includes(JSON.stringify(workflow.name)));
+  }
+  assert.throws(() => listener("attacker/repo", sha));
+  assert.throws(() => listener("joswayski/caper", "main"));
+});
