@@ -18,7 +18,7 @@ export async function launchAmp({ project, prompt, title, agentMode }, apiKey) {
   const installer = join(home, "install.sh");
   await writeFile(installer, await response.text(), { mode: 0o600 });
   await execute("bash", [installer], { env, cwd: home, timeout: 180_000, maxBuffer: 1024 * 1024 });
-  const { stdout } = await execute(
+  const invocation = execute(
     join(env.AMP_HOME, "bin", "amp"),
     ["-ox", prompt, "--project", project, "--title", title, "--mode", agentMode],
     {
@@ -28,6 +28,10 @@ export async function launchAmp({ project, prompt, title, agentMode }, apiKey) {
       maxBuffer: 1024 * 1024,
     },
   );
+  // The prompt is already in argv. Amp also reads non-TTY stdin, so an open
+  // input pipe would time out instead of proceeding with the remote launch.
+  invocation.child.stdin.end();
+  const { stdout } = await invocation;
   const urls = stdout.match(/https:\/\/ampcode\.com\/threads\/T-[a-f0-9-]{36}/g);
   if (urls?.length !== 1) throw new Error("Amp launch response was ambiguous");
   return urls[0];
