@@ -21,17 +21,18 @@ tokens for unattended CLI use; short-lived login/session tokens will not work.
 
 ## Deployment order
 
-1. Merge the automation implementation PR first. This new repository initially
+1. Squash-merge the automation implementation PR first. This repository initially
    uses `master`; no branch rename is required. No infrastructure provisioning,
    OpenTofu apply, secrets migration, database migration, or application/client
    release is needed.
-2. Merge the eight listener PRs only after their pinned action commit has been
-   reviewed and is available in this public repository. A merge commit preserves
-   the pin's ancestry. If squashing/rebasing the automation PR, regenerate the
-   listeners with the final reviewed commit first. Do not merge references to
-   an unreviewed implementation. The app listeners can then merge independently.
+2. The rollout author regenerates the listeners using the **resulting squash
+   commit**, not the automation PR's head commit. Open or update the eight
+   listener PRs after that commit exists on `master`; this is part of preparing
+   the rollout, not a request for the owner to change merge methods. The app
+   listener PRs can then be squash-merged independently without changing their
+   action pins: those pins refer to the separate automation repository.
    They remain disabled without the enable variable. For PR commits using
-   `[skip ci]`, **remove that directive from the final merge/squash message** so
+   `[skip ci]`, **remove that directive from the final squash message** so
    default-branch checks are not inadvertently skipped.
 3. On your own machine, clone the automation repository and configure the token
    privately. These commands require Bash and Node 24. From the repository root:
@@ -154,13 +155,20 @@ change consumers. Preserve the reservation ledger across upgrades/rollbacks.
 
 Change the enrollment policy and tests in an automation PR. Review which events
 are trusted; do not accept a project name or prompt supplied by a webhook or
-commit message. Pin listeners to the full reviewed commit, generated with:
+commit message. Squash-merge that PR before generating the consumers. Resolve
+the resulting commit from GitHub and verify it is on the default branch. For
+the initial rollout (automation PR #1), run from the automation checkout:
 
 ```bash
-git fetch origin
-revision="$(git rev-parse origin/master)"
+git fetch origin master
+revision="$(gh pr view 1 --repo joswayski/automation --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid')"
+git merge-base --is-ancestor "$revision" origin/master
 node scripts/listener.mjs joswayski/caper "$revision"
 ```
+
+Use the relevant merged automation PR number for future rollouts, rather than
+blindly adopting unrelated newer default-branch changes. Full commit pins stay
+immutable; no mutable tag or merge-commit workflow is required.
 
 Write that output to the app's `.github/workflows/amp-ci-repair.yml` on a feature
 branch and submit a PR. Do not weaken or remove its fixed `amp-ci-repair`
