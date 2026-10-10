@@ -109,11 +109,13 @@ function harness(repo = "joswayski/caper") {
 
 test("a failed attempt creates a durable issue and launches the exact Amp project, then suppresses reruns and sibling workflows", async () => {
   const h = harness();
-  assert.deepEqual(await h.run(), { status: "launched", issue: 1, threadURL });
+  assert.deepEqual(await h.run(), { status: "launched", issue: 1, threadURL, agentMode: "high" });
   assert.match(h.state.issues[0].body, /attempts\/2/);
+  assert.match(h.state.issues[0].body, /Agent mode: `high`/);
   assert.match(h.state.comments[0].body, /Status: \*\*launched\*\*/);
   assert.match(h.state.comments[0].body, /ampcode.com\/threads/);
   assert.equal(h.state.launches[0].project, "josevalerio/caper");
+  assert.equal(h.state.launches[0].agentMode, "high");
   assert.match(
     h.state.launches[0].prompt,
     /PR marker: <!-- amp-ci-repair:v1 0123456789abcdef0123456789abcdef01234567 -->/,
@@ -129,6 +131,23 @@ test("a failed attempt creates a durable issue and launches the exact Amp projec
   assert.equal((await h.run()).status, "skipped");
   assert.equal(h.state.launches.length, 1);
   assert.equal(h.state.issues.length, 1);
+});
+
+test("Claude Code can be selected explicitly without reopening an existing reservation", async () => {
+  const h = harness();
+  h.options.agentMode = "external-agent:claude-code";
+  assert.deepEqual(await h.run(), {
+    status: "launched",
+    issue: 1,
+    threadURL,
+    agentMode: "external-agent:claude-code",
+  });
+  assert.equal(h.state.launches[0].agentMode, "external-agent:claude-code");
+  assert.match(h.state.issues[0].body, /Agent mode: `external-agent:claude-code`/);
+  h.options.agentMode = "high";
+  h.state.issues[0].state = "closed";
+  assert.equal((await h.run()).status, "skipped");
+  assert.equal(h.state.launches.length, 1);
 });
 
 test("cancellation with a failed step launches, but ordinary cancellations and successful continue-on-error workflows do not", async () => {
@@ -280,6 +299,7 @@ test("a lost launch response cannot create a second agent and does not leak subp
     return true;
   });
   assert.match(h.state.comments[0].body, /launch unconfirmed/);
+  h.options.agentMode = "external-agent:claude-code";
   assert.equal((await h.run()).status, "skipped");
   assert.equal(h.state.launches.length, 1);
 });
@@ -311,12 +331,16 @@ test("dry run needs no Amp key and makes no writes or launches", async () => {
   const h = harness();
   h.options.dryRun = true;
   h.options.ampKey = "";
-  assert.deepEqual(await h.run(), {
-    status: "would-launch",
-    project: "josevalerio/caper",
-    key: sha,
-    failedJobs: 1,
-  });
+  for (const agentMode of ["high", "external-agent:claude-code"]) {
+    h.options.agentMode = agentMode;
+    assert.deepEqual(await h.run(), {
+      status: "would-launch",
+      project: "josevalerio/caper",
+      key: sha,
+      failedJobs: 1,
+      agentMode,
+    });
+  }
   assert.deepEqual(h.state.writes, []);
   assert.deepEqual(h.state.launches, []);
 });
@@ -342,7 +366,7 @@ test("safety checks cover all pages of jobs, issues, and repair PRs", async () =
   assert.equal(h.state.launches.length, 1);
 });
 
-test("missing credentials and invalid launch limits fail before reserving", async () => {
+test("missing credentials, invalid launch limits and unsupported modes fail before reserving", async () => {
   for (const changes of [
     { ampKey: "" },
     { ampKey: "session-token" },
@@ -350,6 +374,10 @@ test("missing credentials and invalid launch limits fail before reserving", asyn
     { dailyLimit: "11" },
     { dailyLimit: "1.5" },
     { dailyLimit: "NaN" },
+    { agentMode: "claude-code" },
+    { agentMode: "claude-opus-5-5" },
+    { agentMode: "ultra" },
+    { agentMode: "high --fast" },
   ]) {
     const h = harness();
     Object.assign(h.options, changes);
@@ -365,6 +393,7 @@ test("listeners pin one shared implementation and carry the serialization, permi
     assert.match(yaml, /uses: joswayski\/automation@0123456789abcdef0123456789abcdef01234567/);
     assert.match(yaml, /group: amp-ci-repair\n  queue: max/);
     assert.match(yaml, /enabled: \$\{\{ vars.AMP_REPAIR_ENABLED }}/);
+    assert.match(yaml, /agent-mode: \$\{\{ vars.AMP_REPAIR_MODE \|\| 'high' }}/);
     assert.match(yaml, /amp-api-key: \$\{\{ secrets.AMP_API_KEY }}/);
     assert.match(yaml, /issues: write/);
     assert.doesNotMatch(

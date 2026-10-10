@@ -47,7 +47,7 @@ If a fix is warranted, push only the repair branch and open one ready-for-review
 // The caller's fixed concurrency group serializes reservations. Persist before
 // launching: a timeout can mean the orb exists even if no URL reached Actions.
 export async function repair(
-  { event, eventName, repo, enabled, dryRun = false, dailyLimit = "3", ampKey },
+  { event, eventName, repo, enabled, dryRun = false, dailyLimit = "3", agentMode = "high", ampKey },
   { github, launch, now = new Date() },
 ) {
   if (enabled !== "true") return skip("Repairs are disabled");
@@ -67,6 +67,8 @@ export async function repair(
   const limit = Number(dailyLimit || "3");
   if (!Number.isInteger(limit) || limit < 1 || limit > 10)
     throw new Error("daily-limit must be an integer from 1 to 10");
+  if (!["high", "external-agent:claude-code"].includes(agentMode))
+    throw new Error("agent-mode must be high or external-agent:claude-code");
   const source = event.workflow_run;
   if (!Number.isSafeInteger(source?.id) || source.id <= 0) return skip("Invalid source run");
   const base = `/repos/${repo}`;
@@ -131,7 +133,13 @@ export async function repair(
   )
     return skip("A repair PR is already open");
   if (dryRun)
-    return { status: "would-launch", project: policy.project, key, failedJobs: failures.length };
+    return {
+      status: "would-launch",
+      project: policy.project,
+      key,
+      failedJobs: failures.length,
+      agentMode,
+    };
 
   try {
     await github.call(`${base}/labels/${label}`);
@@ -146,6 +154,8 @@ export async function repair(
   const runURL = `https://github.com/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}`;
   const body = `${marker}
 An automatic repair attempt is reserved for [this failed run](${runURL}).
+
+Agent mode: \`${agentMode}\`. There is no automatic mode failover; inspect and stop any existing agent before starting a manual replacement.
 
 Status: **reserved**. See the launch-status comment for the thread link. If no comment appears, the launch may still have started. Do not rerun to create another agent; check Amp first.
 
@@ -164,6 +174,7 @@ The agent may propose a PR or report a blocker. Nothing authorizes an automatic 
       project: policy.project,
       prompt: promptFor({ repo, run, project: policy.project, issue, marker, key }),
       title: `CI repair: ${repo} ${key.slice(0, 12)}`,
+      agentMode,
     });
     if (!/^https:\/\/ampcode\.com\/threads\/T-[a-f0-9-]{36}$/.test(threadURL))
       throw new Error("Amp did not return a valid thread URL");
@@ -186,5 +197,5 @@ The agent may propose a PR or report a blocker. Nothing authorizes an automatic 
       `Thread created at ${threadURL}, but its link could not be added to issue #${issue.number}. Do not relaunch.`,
     );
   }
-  return { status: "launched", issue: issue.number, threadURL };
+  return { status: "launched", issue: issue.number, threadURL, agentMode };
 }
