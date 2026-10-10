@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { repair } from "../src/repair.mjs";
+import { launchAmp } from "../src/amp.mjs";
 import { GitHub } from "../src/github.mjs";
 import { listener } from "../scripts/listener.mjs";
 import repositories from "../src/repositories.json" with { type: "json" };
@@ -405,4 +406,40 @@ test("listeners pin one shared implementation and carry the serialization, permi
   }
   assert.throws(() => listener("attacker/repo", sha));
   assert.throws(() => listener("joswayski/caper", "main"));
+});
+
+test("the CLI launcher can finish reading stdin when its prompt is passed as an argument", async (t) => {
+  // Keep the process boundary real: this CLI fixture needs EOF like Amp does,
+  // but times out quickly if the parent leaves its input pipe open.
+  t.mock.method(globalThis, "fetch", async () => new Response(`#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$AMP_HOME/bin"
+cat > "$AMP_HOME/bin/amp" <<'CLI'
+#!/usr/bin/env bash
+if read -r -t 2; then
+  echo 'Unexpected stdin data' >&2
+  exit 1
+else
+  status=$?
+  if [[ "$status" != 1 ]]; then
+    echo 'Timed out waiting for stdin EOF' >&2
+    exit 1
+  fi
+fi
+printf '%s\\n' '${threadURL}'
+CLI
+chmod +x "$AMP_HOME/bin/amp"
+`));
+  assert.equal(
+    await launchAmp(
+      {
+        project: "josevalerio/caper",
+        prompt: "Investigate a failed CI run",
+        title: "CI repair regression test",
+        agentMode: "high",
+      },
+      "sgamp_test-only-not-a-real-token",
+    ),
+    threadURL,
+  );
 });
