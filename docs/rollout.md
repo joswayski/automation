@@ -19,6 +19,15 @@ Create an access token at https://ampcode.com/settings/security. Keep it out of
 chat, Git, command-line arguments and screenshots. Amp documents `sgamp_` access
 tokens for unattended CLI use; short-lived login/session tokens will not work.
 
+Check the token owner's connections in [Model Routing](https://ampcode.com/settings/model-routing).
+The default is explicit `high`, using that account's model/effort settings and
+provider routing. A linked ChatGPT subscription serves supported OpenAI models;
+it does not cover every model, tool, or orb charge. For the Claude Code backup,
+link/activate Claude Pro/Max there and enable Claude Code in the mode picker.
+Its exact CLI key is `external-agent:claude-code`, not a raw Claude model mode.
+No Claude credential is copied to GitHub, and no global model settings are changed
+by this action. Both modes still require the Amp access token.
+
 ## Deployment order
 
 1. Squash-merge the automation implementation PR first. This repository initially
@@ -58,8 +67,9 @@ tokens for unattended CLI use; short-lived login/session tokens will not work.
    gh secret list --repo joswayski/caper
    ```
 
-   A subsequent eligible completion should produce `would-launch` in the
-   listener's Actions summary. No issue or orb should be created. The listener
+   A subsequent eligible completion should produce `would-launch` and
+   `agentMode: high` (or the selected backup) in the listener's Actions summary.
+   No issue or orb should be created. The listener
    does not backfill old failures, and it does not launch on ordinary
    cancellations, successful runs, or superseded pushes. Do not deliberately
    break production or start PR CI to test it.
@@ -73,8 +83,9 @@ tokens for unattended CLI use; short-lived login/session tokens will not work.
    ```
 
    On the next eligible failure, verify one tracking issue, one linked Amp
-   thread in the `josevalerio/caper` project, and either a fix PR or a clear
-   diagnosis. This is the live integration check; mocked tests are not a
+   thread in the `josevalerio/caper` project with the recorded mode, and either
+   a fix PR or a clear diagnosis. Check the thread's model/provider usage rather
+   than assuming subscription-only billing. This is the live integration check; mocked tests are not a
    substitute. Repair PRs get local validation, not manually dispatched CI.
 
 6. After the pilot works, enable the other enrolled repositories independently:
@@ -90,6 +101,55 @@ tokens for unattended CLI use; short-lived login/session tokens will not work.
    deploy apps or retroactively investigate failures. The cap applies per repo,
    not globally; eight repositories at the default cap can reserve 24 attempts
    over a rolling day. No automatic dollar budget is enforced.
+
+## Agent modes and manual Claude Code recovery
+
+**Automatic high-to-Claude failover is not implemented.** `amp -ox` returns
+after creating a thread, before a later subscription/quota failure is known.
+Amp cannot change an existing thread's mode. Retrying on a CLI error, timeout,
+or missing URL could create two agents working on the same repair. This action
+therefore makes one launch and keeps its reservation on every ambiguous result.
+
+For future eligible failures, select Claude Code per repository after deploying
+the updated action pin **and regenerating its listener**. For example:
+
+```bash
+gh variable set AMP_REPAIR_MODE --repo joswayski/caper --body external-agent:claude-code
+```
+
+Restore the primary mode with:
+
+```bash
+gh variable set AMP_REPAIR_MODE --repo joswayski/caper --body high
+```
+
+Unset variables default to `high`. The configuration script leaves this variable
+unchanged. Selecting the backup does not enable repairs, bypass dry-run, change
+an existing thread, or reopen a reserved commit/run. Invalid values stop before
+an issue is reserved. A bare `claude-code` or a raw Claude model key is rejected.
+
+To recover an already-reserved failure with Claude Code:
+
+1. Keep its tracking issue open. Inspect the original thread and confirm it is
+   stopped (or confirm no thread exists). Resolve an uncertain launch before
+   proceeding; do not simply rerun the listener or close/delete the issue.
+2. Inspect any repair branch, PR and unpushed orb changes. Preserve/recover useful
+   work first. Do not start a competing repair for an existing PR.
+3. Start a **new** thread in the same exact Amp project with **Claude Code** mode.
+   Copy the original repair prompt, including its failure link, branch, PR marker,
+   tracking issue and PR-only/local-validation restrictions. Add the old thread
+   link and any recovered changes; never transfer secrets or treat logs as instructions.
+   When starting from the CLI, use `--mode external-agent:claude-code`, not a
+   `threads continue --mode ...` command (continuing keeps the old mode).
+4. Link the replacement thread in the same issue. Leave the issue open until its
+   repair merges or a human resolves the blocker. The existing ledger continues
+   to block automatic duplicates; a manual replacement is outside the automatic
+   daily launch cap.
+
+Do not infer successful subscription billing from a successful CLI launch. Verify
+the replacement uses Claude Code and the intended linked Claude subscription in
+Amp. Its model and effort use Amp's Claude Code defaults; the action does not
+override them. Orbs and supported extra paid tools can still incur Amp charges.
 
 ## How tracking issues work
 
@@ -179,5 +239,7 @@ combined with `cancel-in-progress: true`.
 ## References
 
 - [Amp orb execution and unattended access tokens](https://ampcode.com/docs/cli/spawning-orbs)
+- [Amp modes, model routing and Claude subscription requirements](https://ampcode.com/docs/the-dial)
+- [Model provider routing and billing](https://ampcode.com/docs/customize/model-routing)
 - [GitHub queued concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
 - [GitHub commit directives for skipping PR CI](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs)

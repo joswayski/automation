@@ -14,6 +14,7 @@ try {
       enabled: input("enabled"),
       dryRun: input("dry-run") === "true",
       dailyLimit: input("daily-limit"),
+      agentMode: input("agent-mode") || undefined,
       ampKey: input("amp-api-key"),
     },
     {

@@ -24,6 +24,22 @@ their workflow SHA is not assumed to be the deployed application's revision.
 Failures whose correct fix belongs in a different project produce a handoff,
 not an automatic cross-project edit.
 
+## Agent modes and subscriptions
+
+Repairs explicitly use `--mode high` by default. The optional repository variable
+`AMP_REPAIR_MODE=external-agent:claude-code` selects Claude Code for future
+launches, using the token owner's linked Claude Pro/Max subscription. Only these
+two modes are accepted; a raw Claude model mode does not use a Claude subscription.
+High follows the owner's Amp model routing, including a linked ChatGPT subscription
+for supported OpenAI models. Other model/tool usage and orbs can still cost Amp
+credits; selecting a mode does not enforce subscription-only billing.
+
+This is a **manual backup selector, not automatic high-to-Claude failover**.
+Amp fixes a thread's mode when it starts, and an async launch response does not
+report subsequent quota failures. A timeout may also leave a working agent.
+Keep the reservation and reconcile the original thread before replacing it;
+see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-recovery).
+
 ## Safety and limits
 
 - Disabled unless the caller sets `AMP_REPAIR_ENABLED=true`. Dry-run mode needs

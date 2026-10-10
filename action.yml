@@ -16,6 +16,9 @@ inputs:
   daily-limit:
     description: Maximum reservations per repository in a rolling 24 hours (1–10).
     default: "3"
+  agent-mode:
+    description: Explicit Amp mode (high or external-agent:claude-code). Selection is manual, not automatic failover.
+    default: high
 runs:
   using: node24
   main: src/main.mjs

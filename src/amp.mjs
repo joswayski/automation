@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 
 const execute = promisify(execFile);
 
-export async function launchAmp({ project, prompt, title }, apiKey) {
+export async function launchAmp({ project, prompt, title, agentMode }, apiKey) {
   const home = await mkdtemp(join(tmpdir(), "amp-ci-repair-"));
   // Never pass the caller's GitHub token, other Actions secrets, or environment
   // overrides to the downloaded installer or CLI. No failing-run checkout exists.
@@ -20,7 +20,7 @@ export async function launchAmp({ project, prompt, title }, apiKey) {
   await execute("bash", [installer], { env, cwd: home, timeout: 180_000, maxBuffer: 1024 * 1024 });
   const { stdout } = await execute(
     join(env.AMP_HOME, "bin", "amp"),
-    ["-ox", prompt, "--project", project, "--title", title],
+    ["-ox", prompt, "--project", project, "--title", title, "--mode", agentMode],
     {
       env: { ...env, AMP_API_KEY: apiKey },
       cwd: home,
