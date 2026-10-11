@@ -16,7 +16,10 @@ function harness(repo = "joswayski/caper") {
     repository: { id: 42, full_name: repo, default_branch: "main" },
     run: {
       id: 123,
+      workflow_id: 7,
+      run_number: 10,
       run_attempt: 2,
+      created_at: "2026-10-10T15:00:00Z",
       path: ".github/workflows/ci.yml",
       name: "CI",
       event: "push",
@@ -28,6 +31,9 @@ function harness(repo = "joswayski/caper") {
     },
     head: sha,
     jobs: [{ id: 9, conclusion: "failure", steps: [] }],
+    runs: [],
+    runsTotal: undefined,
+    failRunsList: false,
     issues: [],
     comments: [],
     prs: [],
@@ -65,6 +71,13 @@ function harness(repo = "joswayski/caper") {
       if (path === `/actions/runs/${state.run.id}`) return json(state.run);
       if (path === `/actions/runs/${state.run.id}/attempts/${state.run.run_attempt}/jobs`)
         return json({ jobs: page(state.jobs) });
+      if (path === `/actions/workflows/${state.run.workflow_id}/runs`) {
+        if (state.failRunsList) return json({}, 503);
+        return json({
+          workflow_runs: page(state.runs),
+          total_count: state.runsTotal ?? state.runs.length,
+        });
+      }
       if (path === "/git/ref/heads/main") return json({ object: { sha: state.head } });
       if (path === "/issues") return json(page(state.issues));
       if (path === "/pulls") return json(page(state.prs));
@@ -224,8 +237,14 @@ test("only enrolled, trusted main completions and the latest attempt are eligibl
     "stale attempt": (h) => {
       h.state.run.run_attempt++;
     },
-    "superseded push": (h) => {
-      h.state.head = otherSha;
+    "missing workflow identity": (h) => {
+      delete h.state.run.workflow_id;
+    },
+    "invalid workflow run ordering": (h) => {
+      h.state.run.run_number = 0;
+    },
+    "missing creation time": (h) => {
+      delete h.state.run.created_at;
     },
   };
   for (const [name, modify] of Object.entries(cases))
@@ -238,6 +257,85 @@ test("only enrolled, trusted main completions and the latest attempt are eligibl
     });
 });
 
+test("a path-filtered native failure remains eligible after an unrelated main commit", async () => {
+  const h = harness();
+  Object.assign(h.state.run, {
+    path: ".github/workflows/native.yml",
+    name: "Native development builds",
+    conclusion: "cancelled",
+  });
+  h.state.jobs = [{ conclusion: "cancelled", steps: [{ conclusion: "failure" }] }];
+  h.state.head = otherSha;
+  h.state.runs = [h.state.run]; // No native push ran on the logo-only commit.
+  assert.equal((await h.run()).status, "launched");
+  assert.equal(h.state.launches.length, 1);
+  assert.match(h.state.launches[0].prompt, /Fetch the current default branch/);
+  assert.match(h.state.launches[0].prompt, /Verify the failure is still relevant before editing/);
+});
+
+test("only a newer trusted push of the same workflow on a different SHA supersedes a failure", async (t) => {
+  const cases = [
+    ["completed success", {}, true],
+    ["completed failure", { conclusion: "failure" }, true],
+    ["completed timeout", { conclusion: "timed_out" }, true],
+    ["completed cancellation", { conclusion: "cancelled" }, true],
+    ["queued", { status: "queued", conclusion: null }, true],
+    ["in progress", { status: "in_progress", conclusion: null }, true],
+    ["different workflow ID", { workflow_id: 8 }, false],
+    ["different enrolled workflow", { path: ".github/workflows/native.yml", name: "Native development builds" }, false],
+    ["different workflow name", { name: "Impostor" }, false],
+    ["fork", { head_repository: { id: 43, full_name: "attacker/caper" } }, false],
+    ["wrong repository ID", { head_repository: { id: 43, full_name: "joswayski/caper" } }, false],
+    ["feature branch", { head_branch: "feature" }, false],
+    ["pull request", { event: "pull_request" }, false],
+    ["dispatch", { event: "workflow_dispatch" }, false],
+    ["same SHA", { head_sha: sha }, false],
+    ["older run rerun recently", { run_number: 9, run_attempt: 8, updated_at: "2026-10-10T17:00:00Z" }, false],
+    ["same run number", { run_number: 10 }, false],
+    ["missing run number", { run_number: undefined }, false],
+    ["invalid SHA", { head_sha: "main" }, false],
+    ["invalid attempt", { run_attempt: 0 }, false],
+    ["invalid ID", { id: 0 }, false],
+  ];
+  for (const [name, changes, supersedes] of cases)
+    await t.test(name, async () => {
+      const h = harness();
+      h.state.head = otherSha;
+      h.state.runs = [{
+        ...h.state.run,
+        id: 124,
+        run_number: 11,
+        head_sha: otherSha,
+        conclusion: "success",
+        ...changes,
+      }];
+      const result = await h.run();
+      assert.equal(result.status, supersedes ? "skipped" : "launched");
+      if (supersedes) {
+        assert.match(result.reason, /newer trusted push run of this workflow/);
+        assert.deepEqual(h.state.writes, []);
+        assert.deepEqual(h.state.launches, []);
+      }
+    });
+});
+
+test("supersession checks all pages and refuses failed or truncated workflow lookups", async () => {
+  const h = harness();
+  h.state.runs = [
+    ...Array.from({ length: 100 }, () => ({ ...h.state.run, run_number: 9 })),
+    { ...h.state.run, id: 124, run_number: 11, head_sha: otherSha },
+  ];
+  assert.equal((await h.run()).status, "skipped");
+  h.state.failRunsList = true;
+  await assert.rejects(h.run(), /503/);
+  h.state.failRunsList = false;
+  h.state.runs = Array.from({ length: 1000 }, () => ({ ...h.state.run, run_number: 9 }));
+  h.state.runsTotal = 1001; // GitHub caps filtered workflow searches at 1,000.
+  await assert.rejects(h.run(), /incomplete safety check/);
+  assert.deepEqual(h.state.writes, []);
+  assert.deepEqual(h.state.launches, []);
+});
+
 test("different deployments at the same infrastructure SHA have separate reservations", async () => {
   const h = harness("joswayski/infrastructure");
   Object.assign(h.state.run, {
@@ -246,6 +344,7 @@ test("different deployments at the same infrastructure SHA have separate reserva
     event: "workflow_dispatch",
   });
   h.state.head = otherSha; // Deploys can commit an image pin before their run completes.
+  h.state.failRunsList = true; // Push supersession must not apply to dispatches.
   assert.equal((await h.run()).status, "launched");
   assert.equal(h.state.launches[0].project, "josevalerio/infrastructure");
   assert.match(h.state.issues[0].body, /amp-ci-repair:v1 run-123/);

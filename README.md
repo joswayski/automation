@@ -50,8 +50,16 @@ see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-
 - Re-fetch the run from GitHub and check repository identity, workflow file/name,
   allowed event, `main`, the latest attempt, and failed jobs/steps. A cancelled
   workflow with a failed step is eligible; ordinary cancellations are not.
-- Superseded pushes are ignored. This conservative policy can miss a still-broken
-  older commit when no new matching workflow ran; a human can investigate it.
+- A push is superseded only by a newer trusted `main` push run of the same
+  workflow (ID, file and enrolled name) on a different SHA. Workflow run numbers,
+  not rerun timestamps, establish order. Unrelated commits/workflows, dispatches
+  and same-SHA reruns do not suppress repair. The agent still fetches current
+  `main` and verifies the failure remains relevant before editing.
+- A newer matching run takes over regardless of status/conclusion, including
+  queued, running and cancelled runs. This avoids concurrent/stale work, but a
+  newer ordinary cancellation can leave an older failure needing human review;
+  skipped events are not automatically replayed. Workflow lookup errors or
+  truncated pagination stop before reservation/launch rather than guessing.
 - One reservation per push commit across enrolled workflows, or per non-push run
   across reruns. Deploying two images at one infrastructure SHA uses two run keys.
 - A labelled tracking issue is written **before** installing Amp or launching.
