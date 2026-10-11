@@ -5,11 +5,26 @@ const failureConclusions = new Set(["failure", "timed_out"]);
 const trackingPrefix = "<!-- amp-ci-repair:v1 ";
 const skip = (reason) => ({ status: "skipped", reason });
 
+function failedJob(job) {
+  return (
+    failureConclusions.has(job.conclusion) ||
+    (job.conclusion === "cancelled" &&
+      job.steps?.some((step) => failureConclusions.has(step.conclusion)))
+  );
+}
+
 function trustedRun(run, repository, policy) {
   const filename = run.path?.match(/^\.github\/workflows\/([^/]+\.yml)$/)?.[1];
   const workflow = policy.workflows[filename];
   return (
     workflow &&
+    Number.isSafeInteger(run.id) &&
+    run.id > 0 &&
+    Number.isSafeInteger(run.workflow_id) &&
+    run.workflow_id > 0 &&
+    Number.isSafeInteger(run.run_number) &&
+    run.run_number > 0 &&
+    Number.isFinite(Date.parse(run.created_at)) &&
     run.head_repository?.full_name === repository.full_name &&
     run.head_repository?.id === repository.id &&
     run.head_branch === repository.default_branch &&
@@ -17,9 +32,7 @@ function trustedRun(run, repository, policy) {
     workflow.events.includes(run.event) &&
     /^[a-f0-9]{40}$/.test(run.head_sha) &&
     Number.isSafeInteger(run.run_attempt) &&
-    run.run_attempt > 0 &&
-    run.status === "completed" &&
-    ["failure", "cancelled", "timed_out"].includes(run.conclusion)
+    run.run_attempt > 0
   );
 }
 
@@ -80,7 +93,9 @@ export async function repair(
   if (
     run.id !== source.id ||
     run.run_attempt !== source.run_attempt ||
-    !trustedRun(run, repository, policy)
+    !trustedRun(run, repository, policy) ||
+    run.status !== "completed" ||
+    !["failure", "cancelled", "timed_out"].includes(run.conclusion)
   ) {
     return skip("Untrusted, superseded, successful, or unsupported run");
   }
@@ -88,19 +103,43 @@ export async function repair(
     `${base}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
     "jobs",
   );
-  const failures = jobs.filter(
-    (job) =>
-      failureConclusions.has(job.conclusion) ||
-      (job.conclusion === "cancelled" &&
-        job.steps?.some((step) => failureConclusions.has(step.conclusion))),
-  );
+  const failures = jobs.filter(failedJob);
   if (failures.length === 0)
     return skip("No failed job or failed step; ordinary cancellations are ignored");
 
   if (run.event === "push") {
-    const head = await github.call(`${base}/git/ref/heads/main`);
-    if (head.object.sha !== run.head_sha)
-      return skip("A newer default-branch commit superseded this push");
+    // A path-filtered workflow may not run on the latest main commit. Only
+    // another trusted push of this workflow can take over, even while queued.
+    // run_number orders original runs; rerun timestamps do not establish recency.
+    const runs = await github.list(
+      `${base}/actions/workflows/${run.workflow_id}/runs?branch=main&event=push&created=${encodeURIComponent(`>=${run.created_at}`)}`,
+      "workflow_runs",
+    );
+    for (const candidate of runs) {
+      if (
+        !trustedRun(candidate, repository, policy) ||
+        candidate.workflow_id !== run.workflow_id ||
+        candidate.path !== run.path ||
+        candidate.event !== "push" ||
+        candidate.id === run.id ||
+        candidate.run_number <= run.run_number ||
+        candidate.head_sha === run.head_sha
+      )
+        continue;
+      let supersedes =
+        ["queued", "in_progress"].includes(candidate.status) ||
+        (candidate.status === "completed" &&
+          (candidate.conclusion === "success" || failureConclusions.has(candidate.conclusion)));
+      if (candidate.status === "completed" && candidate.conclusion === "cancelled") {
+        const candidateJobs = await github.list(
+          `${base}/actions/runs/${candidate.id}/attempts/${candidate.run_attempt}/jobs`,
+          "jobs",
+        );
+        supersedes = candidateJobs.some(failedJob);
+      }
+      if (supersedes)
+        return skip("A newer trusted push run of this workflow superseded this push");
+    }
   }
   // Dispatches may deploy different images at the same infrastructure SHA.
   const key = run.event === "push" ? run.head_sha : `run-${run.id}`;

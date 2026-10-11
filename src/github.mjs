@@ -36,7 +36,11 @@ export class GitHub {
       const items = key ? response[key] : response;
       if (!Array.isArray(items)) throw new Error("Unexpected GitHub list response");
       results.push(...items);
-      if (items.length < 100) return results;
+      if (items.length < 100) {
+        if (response.total_count > results.length)
+          throw new Error("GitHub list truncated; refusing an incomplete safety check");
+        return results;
+      }
     }
     throw new Error("GitHub pagination limit reached; refusing an incomplete safety check");
   }
