@@ -5,12 +5,31 @@ const failureConclusions = new Set(["failure", "timed_out"]);
 const trackingPrefix = "<!-- amp-ci-repair:v1 ";
 const skip = (reason) => ({ status: "skipped", reason });
 
-function failedJob(job) {
-  return (
-    failureConclusions.has(job.conclusion) ||
-    (job.conclusion === "cancelled" &&
-      job.steps?.some((step) => failureConclusions.has(step.conclusion)))
-  );
+async function failedJobs(jobs, github, base) {
+  const failures = [];
+  for (const job of jobs) {
+    if (
+      failureConclusions.has(job.conclusion) ||
+      (job.conclusion === "cancelled" &&
+        job.steps?.some((step) => failureConclusions.has(step.conclusion)))
+    ) {
+      failures.push(job);
+    } else if (job.conclusion === "cancelled") {
+      // GitHub can report a job timeout as cancelled, including its active step.
+      // Accept only this repository's API URL, then construct our own API path.
+      const prefix = `https://api.github.com${base}/check-runs/`;
+      const id = typeof job.check_run_url === "string" && job.check_run_url.startsWith(prefix)
+        ? job.check_run_url.slice(prefix.length) : "";
+      if (!/^[1-9][0-9]*$/.test(id) || !Number.isSafeInteger(Number(id)))
+        throw new Error("Invalid job check-run URL; refusing an incomplete safety check");
+      const annotations = await github.list(`${base}/check-runs/${id}/annotations`);
+      if (annotations.some((annotation) =>
+        annotation.annotation_level === "failure" &&
+        /^The job has exceeded the maximum execution time of (?:[0-9]+h)?[0-9]+m[0-9]+s$/.test(annotation.message),
+      )) failures.push(job);
+    }
+  }
+  return failures;
 }
 
 function trustedRun(run, repository, policy) {
@@ -103,7 +122,7 @@ export async function repair(
     `${base}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
     "jobs",
   );
-  const failures = jobs.filter(failedJob);
+  const failures = await failedJobs(jobs, github, base);
   if (failures.length === 0)
     return skip("No failed job or failed step; ordinary cancellations are ignored");
 
@@ -135,7 +154,7 @@ export async function repair(
           `${base}/actions/runs/${candidate.id}/attempts/${candidate.run_attempt}/jobs`,
           "jobs",
         );
-        supersedes = candidateJobs.some(failedJob);
+        supersedes = (await failedJobs(candidateJobs, github, base)).length > 0;
       }
       if (supersedes)
         return skip("A newer trusted push run of this workflow superseded this push");

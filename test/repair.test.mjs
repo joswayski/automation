@@ -34,6 +34,8 @@ function harness(repo = "joswayski/caper") {
     runs: [],
     candidateJobs: {},
     failCandidateJobs: false,
+    annotations: {},
+    failAnnotations: false,
     runsTotal: undefined,
     failRunsList: false,
     issues: [],
@@ -68,15 +70,24 @@ function harness(repo = "joswayski/caper") {
         (Number(url.searchParams.get("page")) - 1) * 100,
         Number(url.searchParams.get("page")) * 100,
       );
+    const jobsResponse = (jobs) => json({ jobs: page(jobs).map((job) => ({
+      check_run_url: `https://api.github.com/repos/${repo}/check-runs/9`,
+      ...job,
+    })) });
     if (init.method === "GET") {
       if (path === "") return json(state.repository);
       if (path === `/actions/runs/${state.run.id}`) return json(state.run);
       if (path === `/actions/runs/${state.run.id}/attempts/${state.run.run_attempt}/jobs`)
-        return json({ jobs: page(state.jobs) });
+        return jobsResponse(state.jobs);
       const candidateAttempt = path.match(/^\/actions\/runs\/(\d+)\/attempts\/(\d+)\/jobs$/);
       if (candidateAttempt) {
         if (state.failCandidateJobs) return json({}, 503);
-        return json({ jobs: page(state.candidateJobs[`${candidateAttempt[1]}/${candidateAttempt[2]}`] ?? []) });
+        return jobsResponse(state.candidateJobs[`${candidateAttempt[1]}/${candidateAttempt[2]}`] ?? []);
+      }
+      const checkAnnotations = path.match(/^\/check-runs\/(\d+)\/annotations$/);
+      if (checkAnnotations) {
+        if (state.failAnnotations) return json({}, state.failAnnotations);
+        return json(page(state.annotations[checkAnnotations[1]] ?? []));
       }
       if (path === `/actions/workflows/${state.run.workflow_id}/runs`) {
         if (state.failRunsList) return json({}, 503);
@@ -189,6 +200,112 @@ test("cancellation with a failed step launches, but ordinary cancellations and s
     assert.equal((await h.run()).status, expected, `${conclusion}/${step}`);
     assert.equal(h.state.launches.length, expected === "launched" ? 1 : 0);
   }
+});
+
+// GitHub's annotation on Caper job 114382111458 (run 38109324188):
+// both the job and its active step were cancelled, not failed or timed_out.
+const timeoutAnnotation = {
+  path: ".github",
+  start_line: 1,
+  end_line: 1,
+  annotation_level: "failure",
+  title: "",
+  message: "The job has exceeded the maximum execution time of 30m0s",
+  raw_details: "",
+};
+const timeoutJob = {
+  id: 9,
+  conclusion: "cancelled",
+  check_run_url: "https://api.github.com/repos/joswayski/caper/check-runs/91",
+  steps: [{ conclusion: "success" }, { conclusion: "cancelled" }],
+};
+
+test("a GitHub timeout annotation repairs a cancelled job once, even with ten successful sibling jobs", async () => {
+  const h = harness();
+  h.state.run.conclusion = "cancelled";
+  h.state.jobs = [...Array.from({ length: 10 }, () => ({ conclusion: "success" })), timeoutJob];
+  h.state.annotations["91"] = [timeoutAnnotation, {
+    annotation_level: "failure", message: "The operation was canceled.",
+  }];
+  h.options.dryRun = true;
+  assert.equal((await h.run()).failedJobs, 1);
+  h.options.dryRun = false;
+  assert.equal((await h.run()).status, "launched");
+  assert.match((await h.run()).reason, /already reserved/);
+  assert.equal(h.state.launches.length, 1);
+  assert.equal(h.state.issues.length, 1);
+});
+
+test("cancelled sources and exact-attempt replacements use the same narrow timeout annotation rule", async (t) => {
+  const cases = [
+    ["GitHub timeout", [timeoutAnnotation], true],
+    ["different budget", [{ ...timeoutAnnotation, message: "The job has exceeded the maximum execution time of 6h0m0s" }], true],
+    ["successful job", [timeoutAnnotation], false, "success"],
+    ["ordinary cancellation", [{ annotation_level: "failure", message: "The operation was canceled." }], false],
+    ["no annotations", [], false],
+    ["warning only", [{ ...timeoutAnnotation, annotation_level: "warning" }], false],
+    ["notice only", [{ ...timeoutAnnotation, annotation_level: "notice" }], false],
+    ["unrelated failure", [{ ...timeoutAnnotation, message: "Test timed out after 30 minutes" }], false],
+    ["quoted timeout", [{ ...timeoutAnnotation, message: `Reported: ${timeoutAnnotation.message}` }], false],
+    ["timeout with appended text", [{ ...timeoutAnnotation, message: `${timeoutAnnotation.message}\nother error` }], false],
+    ["invalid duration", [{ ...timeoutAnnotation, message: "The job has exceeded the maximum execution time of something" }], false],
+    ["page-two timeout", [...Array.from({ length: 100 }, () => ({ annotation_level: "notice", message: "unrelated" })), timeoutAnnotation], true],
+  ];
+  for (const candidate of [false, true])
+    for (const [name, annotations, timedOut, conclusion = "cancelled"] of cases)
+      await t.test(`${candidate ? "replacement" : "source"}: ${name}`, async () => {
+        const h = harness();
+        h.options.dryRun = true;
+        h.state.annotations["91"] = annotations;
+        if (candidate) {
+          h.state.runs = [{ ...h.state.run, id: 124, run_number: 11, run_attempt: 3, head_sha: otherSha, conclusion: "cancelled" }];
+          h.state.candidateJobs["124/3"] = [{ ...timeoutJob, conclusion }];
+          h.state.candidateJobs["124/2"] = [{ ...timeoutJob, check_run_url: "https://api.github.com/repos/joswayski/caper/check-runs/92" }];
+          // A stale attempt has the opposite evidence and must never count.
+          h.state.annotations["92"] = timedOut ? [] : [timeoutAnnotation];
+        } else {
+          h.state.run.conclusion = "cancelled";
+          h.state.jobs = [{ ...timeoutJob, conclusion }];
+        }
+        const result = await h.run();
+        assert.equal(result.status, (candidate ? !timedOut : timedOut) ? "would-launch" : "skipped");
+        if (result.status === "skipped")
+          assert.match(result.reason, candidate ? /superseded/ : /ordinary cancellations/);
+        assert.deepEqual(h.state.writes, []);
+        assert.deepEqual(h.state.launches, []);
+      });
+});
+
+test("unsafe check-run URLs and failed or incomplete annotations stop before reservation for sources and replacements", async (t) => {
+  const cases = [
+    ["missing URL", (h, job) => { job.check_run_url = undefined; }],
+    ["external host", (h, job) => { job.check_run_url = "https://example.com/repos/joswayski/caper/check-runs/91"; }],
+    ["another repository", (h, job) => { job.check_run_url = "https://api.github.com/repos/attacker/caper/check-runs/91"; }],
+    ["URL credentials", (h, job) => { job.check_run_url = "https://attacker@api.github.com/repos/joswayski/caper/check-runs/91"; }],
+    ["path traversal", (h, job) => { job.check_run_url = "https://api.github.com/repos/joswayski/caper/check-runs/../91"; }],
+    ["query", (h, job) => { job.check_run_url += "?other=1"; }],
+    ["invalid ID", (h, job) => { job.check_run_url = "https://api.github.com/repos/joswayski/caper/check-runs/0"; }],
+    ["missing checks permission", (h) => { h.state.failAnnotations = 403; }],
+    ["lookup error", (h) => { h.state.failAnnotations = 503; }],
+    ["pagination limit", (h) => { h.state.annotations["91"] = Array.from({ length: 10000 }, () => timeoutAnnotation); }],
+  ];
+  for (const candidate of [false, true])
+    for (const [name, modify] of cases)
+      await t.test(`${candidate ? "replacement" : "source"}: ${name}`, async () => {
+        const h = harness();
+        const job = { ...timeoutJob };
+        modify(h, job);
+        if (candidate) {
+          h.state.runs = [{ ...h.state.run, id: 124, run_number: 11, head_sha: otherSha, conclusion: "cancelled" }];
+          h.state.candidateJobs["124/2"] = [job];
+        } else {
+          h.state.run.conclusion = "cancelled";
+          h.state.jobs = [job];
+        }
+        await assert.rejects(h.run(), /check-run URL|403|503|incomplete safety check/);
+        assert.deepEqual(h.state.writes, []);
+        assert.deepEqual(h.state.launches, []);
+      });
 });
 
 test("only enrolled, trusted main completions and the latest attempt are eligible", async (t) => {
@@ -559,9 +676,10 @@ test("listeners pin one shared implementation and carry the serialization, permi
     assert.match(yaml, /agent-mode: \$\{\{ vars.AMP_REPAIR_MODE \|\| 'high' }}/);
     assert.match(yaml, /amp-api-key: \$\{\{ secrets.AMP_API_KEY }}/);
     assert.match(yaml, /issues: write/);
+    assert.match(yaml, /checks: read/);
     assert.doesNotMatch(
       yaml,
-      /contents: write|pull-requests: write|actions\/checkout|secrets: inherit|workflow_dispatch:/,
+      /checks: write|contents: write|pull-requests: write|actions\/checkout|secrets: inherit|workflow_dispatch:/,
     );
     for (const workflow of Object.values(policy.workflows))
       assert.ok(yaml.includes(JSON.stringify(workflow.name)));

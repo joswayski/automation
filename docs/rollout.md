@@ -203,8 +203,14 @@ and failure commit/run, then continue that thread manually. Do not blindly rerun
 or remove the ledger marker. If no thread was created, a human can start a
 repair manually and link it; automated retry is intentionally unavailable.
 
-The source run must have an actual failed/timed-out job or a failed step in a
-cancelled job. A workflow rejected before it can create jobs will be skipped;
+The source run must have an actual failed/timed-out job, a failed step in a
+cancelled job, or a failure annotation with GitHub's job execution-time-limit
+message on a cancelled job's check run. Ordinary cancellation annotations do
+not count. The same rule applies to cancelled supersession candidates. Check-run
+annotations require `checks: read`; regenerate existing listeners as well as
+updating their action pin. Unsafe check-run URLs, annotation permission errors,
+and incomplete pagination stop before reservation or launch.
+A workflow rejected before it can create jobs will be skipped;
 check its workflow validation error manually. Workflow names/files/events are
 an allowlist, so renaming or adding a workflow needs a policy/listener update.
 
