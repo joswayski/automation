@@ -22,6 +22,7 @@ ${workflows}
 
 permissions:
   actions: read
+  checks: read
   contents: read
   issues: write
   pull-requests: read

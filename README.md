@@ -49,7 +49,11 @@ see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-
   no Amp key and performs no writes or launches.
 - Re-fetch the run from GitHub and check repository identity, workflow file/name,
   allowed event, `main`, the latest attempt, and failed jobs/steps. A cancelled
-  workflow with a failed step is eligible; ordinary cancellations are not.
+  workflow with a failed step or GitHub job execution-time-limit failure annotation
+  is eligible; ordinary cancellations are not. Annotation lookups accept only
+  same-repository GitHub API check-run URLs and require `checks: read` in the
+  generated listener. Updating an existing action pin alone does not grant this
+  permission; regenerate its listener too.
 - A push is superseded only by a newer trusted `main` push run of the same
   workflow (ID, file and enrolled name) on a different SHA. Workflow run numbers,
   not rerun timestamps, establish order. Unrelated commits/workflows, dispatches
@@ -58,7 +62,8 @@ see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-
 - A newer matching run takes over when `queued` or `in_progress`, or completed
   with success, failure or timeout. A completed cancellation takes over only if
   its exact attempt has a failed/timed-out job or a failed/timed-out step in a
-  cancelled job, using the same failure rule as repair eligibility. Ordinary
+  cancelled job, or a GitHub job timeout failure annotation, using the same
+  failure rule as repair eligibility. Ordinary
   cancellations, skipped runs, and missing/unknown statuses do not supersede.
   A queued/running replacement can later be cancelled without failures; skipped
   repair events are not automatically replayed. Workflow/job lookup errors or
