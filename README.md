@@ -55,10 +55,13 @@ see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-
   not rerun timestamps, establish order. Unrelated commits/workflows, dispatches
   and same-SHA reruns do not suppress repair. The agent still fetches current
   `main` and verifies the failure remains relevant before editing.
-- A newer matching run takes over regardless of status/conclusion, including
-  queued, running and cancelled runs. This avoids concurrent/stale work, but a
-  newer ordinary cancellation can leave an older failure needing human review;
-  skipped events are not automatically replayed. Workflow lookup errors or
+- A newer matching run takes over when `queued` or `in_progress`, or completed
+  with success, failure or timeout. A completed cancellation takes over only if
+  its exact attempt has a failed/timed-out job or a failed/timed-out step in a
+  cancelled job, using the same failure rule as repair eligibility. Ordinary
+  cancellations, skipped runs, and missing/unknown statuses do not supersede.
+  A queued/running replacement can later be cancelled without failures; skipped
+  repair events are not automatically replayed. Workflow/job lookup errors or
   truncated pagination stop before reservation/launch rather than guessing.
 - One reservation per push commit across enrolled workflows, or per non-push run
   across reruns. Deploying two images at one infrastructure SHA uses two run keys.

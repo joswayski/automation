@@ -5,6 +5,14 @@ const failureConclusions = new Set(["failure", "timed_out"]);
 const trackingPrefix = "<!-- amp-ci-repair:v1 ";
 const skip = (reason) => ({ status: "skipped", reason });
 
+function failedJob(job) {
+  return (
+    failureConclusions.has(job.conclusion) ||
+    (job.conclusion === "cancelled" &&
+      job.steps?.some((step) => failureConclusions.has(step.conclusion)))
+  );
+}
+
 function trustedRun(run, repository, policy) {
   const filename = run.path?.match(/^\.github\/workflows\/([^/]+\.yml)$/)?.[1];
   const workflow = policy.workflows[filename];
@@ -95,12 +103,7 @@ export async function repair(
     `${base}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
     "jobs",
   );
-  const failures = jobs.filter(
-    (job) =>
-      failureConclusions.has(job.conclusion) ||
-      (job.conclusion === "cancelled" &&
-        job.steps?.some((step) => failureConclusions.has(step.conclusion))),
-  );
+  const failures = jobs.filter(failedJob);
   if (failures.length === 0)
     return skip("No failed job or failed step; ordinary cancellations are ignored");
 
@@ -112,19 +115,31 @@ export async function repair(
       `${base}/actions/workflows/${run.workflow_id}/runs?branch=main&event=push&created=${encodeURIComponent(`>=${run.created_at}`)}`,
       "workflow_runs",
     );
-    if (
-      runs.some(
-        (candidate) =>
-          trustedRun(candidate, repository, policy) &&
-          candidate.workflow_id === run.workflow_id &&
-          candidate.path === run.path &&
-          candidate.event === "push" &&
-          candidate.id !== run.id &&
-          candidate.run_number > run.run_number &&
-          candidate.head_sha !== run.head_sha,
+    for (const candidate of runs) {
+      if (
+        !trustedRun(candidate, repository, policy) ||
+        candidate.workflow_id !== run.workflow_id ||
+        candidate.path !== run.path ||
+        candidate.event !== "push" ||
+        candidate.id === run.id ||
+        candidate.run_number <= run.run_number ||
+        candidate.head_sha === run.head_sha
       )
-    )
-      return skip("A newer trusted push run of this workflow superseded this push");
+        continue;
+      let supersedes =
+        ["queued", "in_progress"].includes(candidate.status) ||
+        (candidate.status === "completed" &&
+          (candidate.conclusion === "success" || failureConclusions.has(candidate.conclusion)));
+      if (candidate.status === "completed" && candidate.conclusion === "cancelled") {
+        const candidateJobs = await github.list(
+          `${base}/actions/runs/${candidate.id}/attempts/${candidate.run_attempt}/jobs`,
+          "jobs",
+        );
+        supersedes = candidateJobs.some(failedJob);
+      }
+      if (supersedes)
+        return skip("A newer trusted push run of this workflow superseded this push");
+    }
   }
   // Dispatches may deploy different images at the same infrastructure SHA.
   const key = run.event === "push" ? run.head_sha : `run-${run.id}`;
