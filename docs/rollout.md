@@ -12,7 +12,7 @@ permission for the caller token.
 All eight exact Amp projects already existed when the enrollment was prepared.
 Check their repository access, secrets, guidance and orb setup. In particular,
 the repair orb needs permission to read private Actions logs, push a branch,
-create a PR and update its tracking issue. The listener's `GITHUB_TOKEN` is **not**
+create and merge its own PR, and update its tracking issue. The listener's `GITHUB_TOKEN` is **not**
 forwarded to the orb and cannot provide that access.
 
 Create an access token at https://ampcode.com/settings/security. Keep it out of
@@ -43,6 +43,11 @@ by this action. Both modes still require the Amp access token.
    They remain disabled without the enable variable. For PR commits using
    `[skip ci]`, **remove that directive from the final squash message** so
    default-branch checks are not inadvertently skipped.
+   Upgrading an already-enabled repo removes its daily cap and authorizes
+   future repair agents to squash-merge their own validated PRs. Existing
+   `AMP_REPAIR_DAILY_LIMIT` values are ignored; no variable cleanup, token
+   rotation, or GitHub auto-merge setting is needed. Already-running agents keep
+   their original instructions unless the owner explicitly updates them.
 3. On your own machine, clone the automation repository and configure the token
    privately. These commands require Bash and Node 24. From the repository root:
 
@@ -52,8 +57,8 @@ by this action. Both modes still require the Amp access token.
    ```
 
    The script prompts for the token once without echoing it, stores the same
-   token as `AMP_API_KEY` in each enrolled repository, sets the rolling limit to
-   three, selects dry-run mode, and **leaves repairs disabled**. If a command
+   token as `AMP_API_KEY` in each enrolled repository, selects dry-run mode,
+   and **leaves repairs disabled**. If a command
    fails, previously processed repositories remain configured but disabled;
    fix the permission error before rerunning. No secrets are stored on disk.
    `bash scripts/configure.sh caper` configures only the pilot.
@@ -84,7 +89,9 @@ by this action. Both modes still require the Amp access token.
 
    On the next eligible failure, verify one tracking issue, one linked Amp
    thread in the `josevalerio/caper` project with the recorded mode, and either
-   a fix PR or a clear diagnosis. Check the thread's model/provider usage rather
+   a locally validated, squash-merged fix PR or a clear blocker/diagnosis.
+   Confirm the merged PR closed its tracking issue and main CI started.
+   Check the thread's model/provider usage rather
    than assuming subscription-only billing. This is the live integration check; mocked tests are not a
    substitute. Repair PRs get local validation, not manually dispatched CI.
 
@@ -98,9 +105,31 @@ by this action. Both modes still require the Amp access token.
    ```
 
    This enables future launches and their normal Amp/orb charges. It does not
-   deploy apps or retroactively investigate failures. The cap applies per repo,
-   not globally; eight repositories at the default cap can reserve 24 attempts
-   over a rolling day. No automatic dollar budget is enforced.
+   retroactively investigate failures. There is no daily launch cap or automatic
+   dollar budget. A failed fix on a new commit can trigger another repair after
+   the previous repair merges and closes its tracking issue. Existing workflows
+   triggered by merges may publish or deploy as they already do.
+
+## Automatic squash merges
+
+The owner has authorized repair agents to merge their own locally validated
+repair PRs without another approval. This applies only to the repair request,
+not unrelated PRs. It is an instruction to the agent, not a listener step or a
+blanket repository auto-merge setting. Listener permissions remain unchanged.
+
+The agent must review its diff, pass the relevant local checks, fetch the latest
+default branch and revalidate if needed, then use a normal squash merge guarded
+by `--match-head-commit` with the exact validated head SHA. It supplies a clean
+squash subject and body without CI-skip directives. It does not run PR CI, use
+`--admin`, weaken repository protection, or manually dispatch a release/deploy.
+If the fix cannot be verified or GitHub rejects the merge, the PR and tracking
+issue remain open with a blocker. Required checks/reviews still apply; this
+automation does not bypass them or enable PR CI to satisfy them.
+
+After merging, the agent verifies the PR is merged and its tracking issue is
+closed; if automatic issue closure did not happen, it closes the issue only
+after confirming the merge. The next distinct failure is then eligible with no
+daily quota. Failures skipped while another repair was open are not replayed.
 
 ## Agent modes and manual Claude Code recovery
 
@@ -137,13 +166,15 @@ To recover an already-reserved failure with Claude Code:
    work first. Do not start a competing repair for an existing PR.
 3. Start a **new** thread in the same exact Amp project with **Claude Code** mode.
    Copy the original repair prompt, including its failure link, branch, PR marker,
-   tracking issue and PR-only/local-validation restrictions. Add the old thread
+   tracking issue, merge authorization and local-validation restrictions. An
+   older PR-only prompt remains PR-only unless the owner explicitly updates it.
+   Add the old thread
    link and any recovered changes; never transfer secrets or treat logs as instructions.
    When starting from the CLI, use `--mode external-agent:claude-code`, not a
    `threads continue --mode ...` command (continuing keeps the old mode).
 4. Link the replacement thread in the same issue. Leave the issue open until its
    repair merges or a human resolves the blocker. The existing ledger continues
-   to block automatic duplicates; a manual replacement is outside the automatic
+   to block automatic duplicates; neither automatic nor manual repairs have a
    daily launch cap.
 
 Do not infer successful subscription billing from a successful CLI launch. Verify
@@ -203,7 +234,8 @@ An already-running listener may have read its opt-in value before the change.
 Inspect active `Amp CI repair` runs and their issues; cancel a pending/running
 listener in GitHub if necessary. **An orb already launched keeps running after
 its Actions job ends or is cancelled**; stop it separately in Amp. Disable does
-not close issues, merge PRs, or roll back applications. Revoke a compromised
+not revoke an existing agent's merge authorization, close issues, merge PRs,
+or roll back applications. Revoke a compromised
 Amp access token in Amp Settings; deleting its GitHub secret alone does not
 revoke the token. Rotate the token with the configuration script when ready.
 
@@ -243,3 +275,4 @@ combined with `cancel-in-progress: true`.
 - [Model provider routing and billing](https://ampcode.com/docs/customize/model-routing)
 - [GitHub queued concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
 - [GitHub commit directives for skipping PR CI](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs)
+- [GitHub CLI squash merges and head-SHA guards](https://cli.github.com/manual/gh_pr_merge)

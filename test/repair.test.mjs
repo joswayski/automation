@@ -121,6 +121,10 @@ test("a failed attempt creates a durable issue and launches the exact Amp projec
     h.state.launches[0].prompt,
     /PR marker: <!-- amp-ci-repair:v1 0123456789abcdef0123456789abcdef01234567 -->/,
   );
+  assert.match(h.state.launches[0].prompt, /owner explicitly authorizes.*squash-merge/);
+  assert.match(h.state.launches[0].prompt, /gh pr merge.*--squash.*--match-head-commit/);
+  assert.match(h.state.launches[0].prompt, /Never use --admin/);
+  assert.match(h.state.issues[0].body, /automatically squash-merge/);
   h.state.issues[0].state = "closed";
   h.state.run.run_attempt = 3;
   h.options.event.workflow_run.run_attempt = 3;
@@ -263,20 +267,22 @@ test("explicitly enrolled chained releases are supported without admitting arbit
   assert.match(h.state.issues[0].body, /amp-ci-repair:v1 run-123/);
 });
 
-test("the rolling daily limit counts reservations, not just successful launches, with a strict 24-hour boundary", async () => {
-  const h = harness();
-  h.options.dailyLimit = "2";
-  for (let i = 0; i < 2; i++) {
-    h.state.run.head_sha = h.state.head = String(i + 1).repeat(40);
-    await h.run();
-    h.state.issues[i].state = "closed";
+test("distinct failures, including failed fixes, have no daily cap even with a legacy limit configured", async () => {
+  // This option used to limit all repairs to three per rolling day. Old callers
+  // must not retain that cap, and raising it to the former maximum of ten is not enough.
+  for (const dailyLimit of [undefined, "3"]) {
+    const h = harness();
+    h.options.dailyLimit = dailyLimit;
+    for (let i = 0; i < 12; i++) {
+      h.state.run.head_sha = h.state.head = (i + 1).toString(16).padStart(40, "0");
+      assert.equal((await h.run()).status, "launched", `failure ${i + 1}`);
+      h.state.issues[i].state = "closed";
+    }
+    assert.equal(h.state.launches.length, 12);
+    assert.equal(h.state.issues.length, 12);
+    assert.match((await h.run()).reason, /already reserved/);
+    assert.equal(h.state.launches.length, 12);
   }
-  h.state.run.head_sha = h.state.head = sha;
-  assert.match((await h.run()).reason, /24-hour/);
-  h.state.issues[0].created_at = "2026-10-09T16:00:00.001Z";
-  assert.equal((await h.run()).status, "skipped");
-  h.state.issues[0].created_at = "2026-10-09T16:00:00.000Z";
-  assert.equal((await h.run()).status, "launched");
 });
 
 test("an open tracking issue pauses newer commits until reviewed; an open repair PR still blocks after issue closure", async () => {
@@ -367,14 +373,10 @@ test("safety checks cover all pages of jobs, issues, and repair PRs", async () =
   assert.equal(h.state.launches.length, 1);
 });
 
-test("missing credentials, invalid launch limits and unsupported modes fail before reserving", async () => {
+test("missing credentials and unsupported modes fail before reserving", async () => {
   for (const changes of [
     { ampKey: "" },
     { ampKey: "session-token" },
-    { dailyLimit: "0" },
-    { dailyLimit: "11" },
-    { dailyLimit: "1.5" },
-    { dailyLimit: "NaN" },
     { agentMode: "claude-code" },
     { agentMode: "claude-opus-5-5" },
     { agentMode: "ultra" },

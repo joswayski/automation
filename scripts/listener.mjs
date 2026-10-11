@@ -47,7 +47,6 @@ jobs:
         with:
           enabled: \${{ vars.AMP_REPAIR_ENABLED }}
           dry-run: \${{ vars.AMP_REPAIR_DRY_RUN == 'true' }}
-          daily-limit: \${{ vars.AMP_REPAIR_DAILY_LIMIT || '3' }}
           agent-mode: \${{ vars.AMP_REPAIR_MODE || 'high' }}
           github-token: \${{ github.token }}
           amp-api-key: \${{ secrets.AMP_API_KEY }}

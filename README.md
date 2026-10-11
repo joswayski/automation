@@ -2,8 +2,11 @@
 
 Opt-in CI failure investigation for Jose Valerio's apps. A failed trusted
 default-branch workflow can start an Amp orb that diagnoses the failure,
-validates a fix locally, and opens a ready-for-review PR. It does **not** merge,
-deploy, publish releases, or promise that every failure has a code fix.
+validates a fix locally, opens a ready-for-review PR, and automatically
+squash-merges its own validated repair without another approval. It does not
+bypass GitHub merge requirements or run deployment/release commands. Existing
+default-branch workflows still run normally after a merge. Not every failure
+has a code fix.
 
 The implementation is a dependency-free Node 24 **shared GitHub Action**. Each
 app has a small generated `workflow_run` listener pinned to one automation
@@ -55,15 +58,20 @@ see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-
   Lost responses, runner termination, and reruns do not silently create another
   agent. Ambiguous launches require human reconciliation, not automatic retries.
 - One open tracking issue or repair PR pauses new launches in that repository.
-  Defaults to three reservations per rolling 24 hours, configurable from 1–10.
-  These are launch limits, **not dollar or agent-runtime limits**.
+  There is **no daily launch cap**, dollar budget, or agent-runtime limit. Once
+  a repair merges and closes its issue, a new failed fix commit is eligible too.
+  The retired `AMP_REPAIR_DAILY_LIMIT` variable and `daily-limit` input are ignored.
 - Caller concurrency queues up to 100 completions. Events beyond that GitHub
-  queue limit can be cancelled. Events skipped while blocked or capped are not
+  queue limit can be cancelled. Events skipped while blocked are not
   replayed automatically; this is not a durable backlog of every failure.
 - The listener never checks out failed-run code, downloads build artifacts, or
   passes its GitHub token to Amp. GitHub permissions are read-only except Issues.
+- The repair agent merges only its own validated PR using the exact validated
+  head SHA, without administrator bypass. An unverified fix or blocked merge
+  stays open for human review. Normal main CI runs after the squash merge;
+  repair PRs do not run CI. No GitHub repository auto-merge setting is required.
 
-The agent's PR-only restrictions are **instructions, not an authorization
+The agent's merge and operational restrictions are **instructions, not an authorization
 sandbox**. Orbs inherit the selected Amp project's GitHub access, secrets, and
 tools. Review that access before enabling unattended repairs. The Amp access
 token can act as its owner and incurs their Amp usage/orb charges; it is not
@@ -86,10 +94,10 @@ npm run check
 ```
 
 Tests exercise the action against a simulated GitHub HTTP API and an Amp launch
-boundary, including cancellations, pagination, deduplication, rolling limits,
-disabled/dry-run behavior, deployment identity, and lost launch responses. They
-are not evidence of a real GitHub-to-Amp launch. CI runs on default-branch pushes,
-never on PRs.
+boundary, including cancellations, pagination, deduplication, uncapped distinct
+failures, disabled/dry-run behavior, deployment identity, lost launch responses,
+and the agent's merge instructions. They are not evidence of a real agent
+completing or merging a fix. CI runs on default-branch pushes, never on PRs.
 
 Workflow linting needs support for GitHub's documented `concurrency.queue` field.
 Actionlint 1.7.12 does not have it; initial validation used the reviewed queue
