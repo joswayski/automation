@@ -3,7 +3,10 @@
 - Keep runtime and tests dependency-free; use Node 24 and `node:test`.
 - Run `npm run check`; validate changed/generated workflows with actionlint.
 - Never start or rerun GitHub workflows on a PR branch. Deliver focused,
-  ready-for-review PRs; do not merge or push the default branch.
+  ready-for-review PRs; never push the default branch directly. Only merge with
+  owner authorization. Generated repair requests carry standing authorization
+  to squash-merge that agent's own locally validated fix without another approval;
+  they must not bypass GitHub merge requirements or run deployment commands.
 - The owner squash-merges PRs. Pin consumers to the resulting default-branch
   commit after the automation PR merges, never its pre-merge head. Update any
   already-open listener PRs yourself; do not ask the owner to use merge commits.

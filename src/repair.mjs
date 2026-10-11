@@ -24,7 +24,7 @@ function trustedRun(run, repository, policy) {
 }
 
 function promptFor({ repo, run, project, issue, marker, key }) {
-  return `Investigate a failed trusted default-branch workflow in ${repo} and, if a code fix is justified, implement and locally validate a focused ready-for-review PR. This is an automatic repair request, not permission to merge, deploy, or publish.
+  return `Investigate a failed trusted default-branch workflow in ${repo} and, if a code fix is justified, implement and locally validate a focused ready-for-review PR. The owner explicitly authorizes you to automatically squash-merge your own validated repair PR without waiting for another approval. This authorization supersedes generic PR-only/no-merge guidance for this repair, but never GitHub branch protection or merge requirements. It does not authorize merging unrelated PRs or running deployment/release commands.
 
 Amp project: ${project}
 Failure: https://github.com/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}
@@ -39,16 +39,20 @@ Read the repository guidance first. Fetch the current default branch and inspect
 
 For workflow_dispatch or workflow_run, the workflow head commit may be orchestration code rather than the deployed application/artifact revision. Identify the actual image/source revision from the workflow and logs before diagnosing. A failed deployment can need an application fix or an infrastructure fix; report a cross-repository handoff if the correct repository is not this project. Do not change unrelated repositories or create more agent threads.
 
-Reproduce where practical, fix the cause, and run the repository's local checks. Do not weaken assertions, skip checks, bypass guards, change credentials, or alter runner/production infrastructure to manufacture a green result. Missing credentials, unavailable runners, provider outages, signing problems, and unavailable native toolchains must be reported honestly; do not invent a code fix or equate Linux/mocked validation with an Apple/device build. Do not start or rerun GitHub workflows, including PR CI. If the repo has automatic pull_request workflows, use a [skip ci] commit message to suppress them and tell the maintainer to remove the skip directive when merging so main CI runs.
+Reproduce where practical, fix the cause, and run the repository's local checks. Do not weaken assertions, skip checks, bypass guards, change credentials, or alter runner/production infrastructure to manufacture a green result. Missing credentials, unavailable runners, provider outages, signing problems, and unavailable native toolchains must be reported honestly; do not invent a code fix or equate Linux/mocked validation with an Apple/device build. Do not start or rerun GitHub workflows, including PR CI. If the repo has automatic pull_request workflows, use a [skip ci] commit message to suppress them. Remove all CI-skip directives from the final squash commit's subject AND body so normal main CI runs, including CI that can trigger another repair if this fix fails.
 
-If a fix is warranted, push only the repair branch and open one ready-for-review PR; never push the default branch, merge, release, deploy, rollback, apply infrastructure, rotate secrets, or enable auto-merge. Include the PR marker, failure link, exact local validation and gaps, and a numbered Deployment order section with operator commands where relevant. Reference Fixes ${repo}#${issue.number} so merging closes the tracking issue. Update the issue with the diagnosis and PR link, but leave it open until the PR merges. If no PR is warranted, post the diagnosis and required human action to the issue and leave it open for review. An open tracking issue pauses further automatic repairs in this repository. Never claim a repair has shipped just because a PR exists.`;
+If a fix is warranted, push only the repair branch and open one ready-for-review PR. Include the PR marker, failure link, exact local validation and gaps, and a numbered Deployment order section with operator commands where relevant. Reference Fixes ${repo}#${issue.number} so merging closes the tracking issue. Update the issue with the diagnosis and PR link, but leave it open until the PR merges.
+
+After relevant local checks pass and you have reviewed your diff, automatically squash-merge that PR. Fetch the current default branch first; if it has advanced, incorporate relevant changes and revalidate before merging. Confirm the PR belongs to ${repo}, targets its default branch, uses your repair branch, and contains only your intended fix. Use gh pr merge <PR> --repo ${repo} --squash --match-head-commit <validated-head-sha> --subject '<clean title>' --body '<clean summary>'. Supply the exact head SHA you validated, not a newly changed head. This is an agent-performed merge, not a requirement to enable GitHub's repository auto-merge setting. Never use --admin, bypass required checks/reviews, change repository settings, or push directly to the default branch. If validation fails, the fix cannot be verified, or GitHub blocks the merge, leave the PR and issue open and report the blocker rather than forcing it. Verify the PR is MERGED and its tracking issue is closed before declaring success; close the tracking issue only after confirming the merge if GitHub did not close it automatically.
+
+Do not manually release, deploy, roll back, apply infrastructure, or rotate secrets. Normal workflows triggered by the merge may build, publish, or deploy according to the repository's existing configuration. If no PR is warranted, post the diagnosis and required human action to the issue and leave it open for review. An open tracking issue pauses further automatic repairs in this repository. There is no daily launch cap: a new failed fix commit can receive its own repair after this issue closes. Never claim a repair has shipped just because a PR exists.`;
 }
 
 // The caller's fixed concurrency group serializes reservations. Persist before
 // launching: a timeout can mean the orb exists even if no URL reached Actions.
 export async function repair(
-  { event, eventName, repo, enabled, dryRun = false, dailyLimit = "3", agentMode = "high", ampKey },
-  { github, launch, now = new Date() },
+  { event, eventName, repo, enabled, dryRun = false, agentMode = "high", ampKey },
+  { github, launch },
 ) {
   if (enabled !== "true") return skip("Repairs are disabled");
   const policy = repositories[repo];
@@ -64,9 +68,6 @@ export async function repair(
     throw new Error(
       "Configure an Amp access token in AMP_API_KEY; CLI session tokens are not supported",
     );
-  const limit = Number(dailyLimit || "3");
-  if (!Number.isInteger(limit) || limit < 1 || limit > 10)
-    throw new Error("daily-limit must be an integer from 1 to 10");
   if (!["high", "external-agent:claude-code"].includes(agentMode))
     throw new Error("agent-mode must be high or external-agent:claude-code");
   const source = event.workflow_run;
@@ -120,11 +121,6 @@ export async function repair(
     };
   if (issues.some((issue) => issue.state === "open"))
     return skip("An open tracking issue needs completion or human review");
-  if (
-    issues.filter((issue) => Date.parse(issue.created_at) > now.getTime() - 86_400_000).length >=
-    limit
-  )
-    return skip("Rolling 24-hour reservation limit reached");
   const prs = await github.list(`${base}/pulls?state=open`);
   if (
     prs.some(
@@ -161,7 +157,7 @@ Status: **reserved**. See the launch-status comment for the thread link. If no c
 
 This issue is the durable attempt record. Leave the label and marker intact, including after closing. An open tracking issue blocks further agents in this repository. Closing permits future commits/runs, not another attempt for this key.
 
-The agent may propose a PR or report a blocker. Nothing authorizes an automatic merge, release, deployment, or production change.`;
+The owner authorizes the agent to automatically squash-merge its own repair PR after relevant local checks pass, without bypassing GitHub merge requirements. A merge closes this issue and permits the next distinct failure; there is no daily launch cap. Unverified fixes and blocked merges stay open for human review. The agent must not run release, deployment, or production operations; existing default-branch workflows still run normally after a merge.`;
   const issue = await github.call(`${base}/issues`, "POST", {
     title: `[Amp repair] ${run.name}: ${key.slice(0, 20)}`,
     body,

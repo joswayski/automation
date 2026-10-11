@@ -46,7 +46,6 @@ for repository in "${repositories[@]}"; do
   # Fail closed before changing credentials. This does not stop existing orbs.
   gh variable set AMP_REPAIR_ENABLED --repo "$repository" --body false
   gh variable set AMP_REPAIR_DRY_RUN --repo "$repository" --body true
-  gh variable set AMP_REPAIR_DAILY_LIMIT --repo "$repository" --body 3
   printf '%s' "$token" | gh secret set AMP_API_KEY --repo "$repository"
   printf '%s: configured, disabled, dry-run selected.\n' "$repository"
 done

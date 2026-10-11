@@ -1,5 +1,5 @@
 name: Amp CI repair
-description: Investigate trusted failed runs in an Amp orb, with durable attempt tracking and PR-only repairs.
+description: Investigate trusted failures in Amp, with durable attempt tracking and automatic squash merges of validated repair PRs.
 inputs:
   github-token:
     description: Caller GITHUB_TOKEN with actions/read, contents/read, pull-requests/read and issues/write.
@@ -14,8 +14,8 @@ inputs:
     description: Evaluate eligibility without creating an issue, installing Amp, or launching an orb.
     default: "false"
   daily-limit:
-    description: Maximum reservations per repository in a rolling 24 hours (1–10).
-    default: "3"
+    description: Deprecated and ignored for older callers. Repairs have no daily cap.
+    required: false
   agent-mode:
     description: Explicit Amp mode (high or external-agent:claude-code). Selection is manual, not automatic failover.
     default: high
