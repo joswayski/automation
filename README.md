@@ -1,131 +1,83 @@
-# Automation
+# Automation — retired
 
-Opt-in CI failure investigation for Jose Valerio's apps. A failed trusted
-default-branch workflow can start an Amp orb that diagnoses the failure,
-validates a fix locally, opens a ready-for-review PR, and automatically
-squash-merges its own validated repair without another approval. It does not
-bypass GitHub merge requirements or run deployment/release commands. Existing
-default-branch workflows still run normally after a merge. Not every failure
-has a code fix.
+Automatic CI repair is retired. Individual working threads investigate their own
+CI failures instead of launching a separate agent after each failed build.
 
-The implementation is a dependency-free Node 24 **shared GitHub Action**. Each
-app has a small generated `workflow_run` listener pinned to one automation
-commit. Using an action rather than a reusable job pins its code and policy
-together, without separately fetching scripts or checking out the failed build.
+This repository retains its history and these cleanup instructions, but no longer
+contains a GitHub Action, agent launcher, enrollment generator, tests or runtime
+dependencies. Normal CI, builds, releases, deployments and runner fallback in
+consumer repositories are unchanged.
 
-## Coverage
+## Retirement order
 
-The enrollment policy covers Caper, Captures, DBM, FindAnything, Credit Card
-Horoscope, josevalerio.com, Godis, and infrastructure. It maps GitHub repositories
-to exact Amp project references; repository URLs alone are ambiguous when several
-Amp projects share the same Git repository. Only the named CI, image, native
-build/release, and deployment workflows are enrolled. Runner watchdogs, install
-workflows, notifications, tags, forks, PRs, and other events are not enrolled.
+The former consumers are `joswayski/caper`, `joswayski/captures`, `joswayski/dbm`,
+`joswayski/findanything`, `joswayski/creditcardhoroscope`,
+`joswayski/josevalerio.com`, `joswayski/godis` and `joswayski/infrastructure`.
 
-Deployment dispatches and FindAnything's chained release are supported explicitly;
-their workflow SHA is not assumed to be the deployed application's revision.
-Failures whose correct fix belongs in a different project produce a handoff,
-not an automatic cross-project edit.
+1. Disable each consumer's `Amp CI repair` workflow before merging removals.
+   From any directory with an authenticated GitHub CLI:
 
-## Agent modes and subscriptions
+   ```bash
+   set -e
+   for repo in caper captures dbm findanything creditcardhoroscope josevalerio.com godis infrastructure; do
+     gh workflow disable amp-ci-repair.yml --repo "joswayski/$repo"
+     gh api "repos/joswayski/$repo/actions/workflows/amp-ci-repair.yml" --jq .state
+   done
+   ```
 
-Repairs explicitly use `--mode high` by default. The optional repository variable
-`AMP_REPAIR_MODE=external-agent:claude-code` selects Claude Code for future
-launches, using the token owner's linked Claude Pro/Max subscription. Only these
-two modes are accepted; a raw Claude model mode does not use a Claude subscription.
-High follows the owner's Amp model routing, including a linked ChatGPT subscription
-for supported OpenAI models. Other model/tool usage and orbs can still cost Amp
-credits; selecting a mode does not enforce subscription-only billing.
+   Expect `disabled_manually` for each. Inspect queued/running repair workflow
+   jobs and cancel those specifically if needed. Disabling a workflow does not
+   stop an Amp thread already launched; review those threads separately and
+   preserve useful work. Do not cancel ordinary CI or delete historical checks,
+   issues, PRs or threads as part of this cleanup.
 
-This is a **manual backup selector, not automatic high-to-Claude failover**.
-Amp fixes a thread's mode when it starts, and an async launch response does not
-report subsequent quota failures. A timeout may also leave a working agent.
-Keep the reservation and reconcile the original thread before replacing it;
-see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-recovery).
+2. Merge the consumer PRs deleting `.github/workflows/amp-ci-repair.yml` in any
+   order, then merge this repository's retirement PR. Removing this Action from
+   the default branch does **not** disable consumers pinned to historical commits.
+   No AWS/Cloudflare changes, OpenTofu apply, database migrations, application
+   service rollout or client releases are required for retirement. Existing
+   consumer workflows retain their usual default-branch push behavior.
 
-## Safety and limits
+3. Remove obsolete repository-level GitHub Actions configuration after checking
+   no remaining workflow uses it. Use an account with Actions secrets/variables
+   administration access; an orb integration can disable workflows and open PRs
+   while still receiving HTTP 403 for these settings. From any directory:
 
-- Disabled unless the caller sets `AMP_REPAIR_ENABLED=true`. Dry-run mode needs
-  no Amp key and performs no writes or launches.
-- Re-fetch the run from GitHub and check repository identity, workflow file/name,
-  allowed event, `main`, the latest attempt, and failed jobs/steps. A cancelled
-  workflow with a failed step or GitHub job execution-time-limit failure annotation
-  is eligible; ordinary cancellations are not. Annotation lookups accept only
-  same-repository GitHub API check-run URLs. The listener requires `checks: write`
-  for its reservation record (which also permits annotation reads). Updating an
-  existing action pin alone does not grant this permission; regenerate its
-  listener too.
-- A push is superseded only by a newer trusted `main` push run of the same
-  workflow (ID, file and enrolled name) on a different SHA. Workflow run numbers,
-  not rerun timestamps, establish order. Unrelated commits/workflows, dispatches
-  and same-SHA reruns do not suppress repair. The agent still fetches current
-  `main` and verifies the failure remains relevant before editing.
-- A newer matching run takes over when `queued` or `in_progress`, or completed
-  with success, failure or timeout. A completed cancellation takes over only if
-  its exact attempt has a failed/timed-out job or a failed/timed-out step in a
-  cancelled job, or a GitHub job timeout failure annotation, using the same
-  failure rule as repair eligibility. Ordinary
-  cancellations, skipped runs, and missing/unknown statuses do not supersede.
-  A queued/running replacement can later be cancelled without failures; skipped
-  repair events are not automatically replayed. Workflow/job lookup errors or
-  truncated pagination stop before reservation/launch rather than guessing.
-- One reservation per push commit across enrolled workflows, or per non-push run
-  across reruns. Deploying two images at one infrastructure SHA uses two run keys.
-- A completed **neutral check** is written before installing Amp or launching.
-  It records an attempt, not successful CI or a verified fix, and links to the
-  Amp thread when launched. The listener and agent do not create GitHub issues.
-  Lost responses, runner termination, and reruns do not silently create another
-  agent. Ambiguous launches require human reconciliation, not automatic retries.
-- Old tracking issues are read only to suppress the same pre-upgrade attempt;
-  their open/closed state never blocks a different commit/run. Matching repair
-  PRs in any state also suppress duplicates, not unrelated failures.
-- Distinct failures continue even when another repair has no fix or a blocked
-  PR. There is **no daily launch cap**, dollar budget, or agent-runtime limit.
-  A new failed fix commit is eligible too. Agents coordinate related work and
-  revalidate against current main before merging.
-  The retired `AMP_REPAIR_DAILY_LIMIT` variable and `daily-limit` input are ignored.
-- Caller concurrency queues up to 100 completions. Events beyond that GitHub
-  queue limit can be cancelled. Events skipped while blocked are not
-  replayed automatically; this is not a durable backlog of every failure.
-- The listener never checks out failed-run code, downloads build artifacts, or
-  passes its GitHub token to Amp. GitHub permissions are read-only except Checks;
-  the listener cannot write issues, code, or PRs.
-- The repair agent merges only its own validated PR using the exact validated
-  head SHA, without administrator bypass. An unverified fix or blocked merge
-  stays open for human review. Normal main CI runs after the squash merge;
-  repair PRs do not run CI. No GitHub repository auto-merge setting is required.
-  Diagnoses that do not justify a PR stay in the Amp thread, not a tracking issue.
+   ```bash
+   set -e
+   for repo in caper captures dbm findanything creditcardhoroscope josevalerio.com godis infrastructure; do
+     repository="joswayski/$repo"
+     variables="$(gh variable list --repo "$repository" --json name --jq '.[].name')"
+     for name in AMP_REPAIR_ENABLED AMP_REPAIR_DRY_RUN AMP_REPAIR_MODE AMP_REPAIR_DAILY_LIMIT; do
+       if printf '%s\n' "$variables" | grep -Fxq "$name"; then
+         gh variable delete "$name" --repo "$repository"
+       fi
+     done
+     secrets="$(gh secret list --repo "$repository" --json name --jq '.[].name')"
+     if printf '%s\n' "$secrets" | grep -Fxq AMP_API_KEY; then
+       gh secret delete AMP_API_KEY --repo "$repository"
+     fi
+     gh variable list --repo "$repository" --json name --jq '.[].name | select(startswith("AMP_REPAIR_"))'
+     gh secret list --repo "$repository" --json name --jq '.[].name | select(. == "AMP_API_KEY")'
+   done
+   ```
 
-The agent's merge and operational restrictions are **instructions, not an authorization
-sandbox**. Orbs inherit the selected Amp project's GitHub access, secrets, and
-tools. Review that access before enabling unattended repairs. The Amp access
-token can act as its owner and incurs their Amp usage/orb charges; it is not
-limited to one repository. Use only trusted repositories and default-branch
-maintainers. The action pin does not pin Amp itself: the official installer
-downloads the current CLI at launch time.
+   The last two commands should print nothing. These commands do not remove
+   organization/environment-level configuration. Do not delete a shared Amp
+   credential used for other work. Deleting a GitHub secret does not revoke the
+   token: revoke the repair-only access token in
+   [Amp Settings → Security](https://ampcode.com/settings/security) once its
+   other uses and existing threads have been reviewed.
 
-## Setup and operation
+## Verification and rollback
 
-See [the rollout and recovery runbook](docs/rollout.md). Merging the action and
-listeners alone does not activate paid repairs. No AWS/Cloudflare infrastructure,
-database migration, application service rollout, or client release is needed.
+In each consumer checkout after fetching the merged default branch, confirm the
+listener is absent and no tracked files reference `joswayski/automation@` or
+`AMP_REPAIR_`. Do not deliberately fail CI or rerun old listeners to test removal.
+This repository has no remaining executable code or workflows to test; use
+`git diff --check` for documentation changes.
 
-## Local validation
-
-Requires Node 24; no dependency installation is needed:
-
-```sh
-npm run check
-```
-
-Tests exercise the action against a simulated GitHub HTTP API and an Amp launch
-boundary, including cancellations, pagination, deduplication, uncapped distinct
-failures, disabled/dry-run behavior, deployment identity, lost launch responses,
-and the agent's merge instructions. They are not evidence of a real agent
-completing or merging a fix. CI runs on default-branch pushes, never on PRs.
-
-Workflow linting needs support for GitHub's documented `concurrency.queue` field.
-Actionlint 1.7.12 does not have it; initial validation used the reviewed queue
-support in [upstream PR #654](https://github.com/rhysd/actionlint/pull/654), built
-from commit `644076a59742c2d1540ebd4686eab3c308f0e562`. Do not remove queuing or
-suppress other diagnostics just to accommodate an older linter.
+History is preserved rather than deleting the repository. Restoring automation
+requires an explicit owner decision, reviewed restoration PRs, reconciled existing
+threads and credentials, and deliberate re-enablement of consumer workflows.
+Reverting this repository alone cannot re-enable the disabled listeners.
