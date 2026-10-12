@@ -22,9 +22,9 @@ ${workflows}
 
 permissions:
   actions: read
-  checks: read
+  checks: write
   contents: read
-  issues: write
+  issues: read
   pull-requests: read
 
 # Serialize durable reservations; retain up to 100 pending completion events.

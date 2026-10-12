@@ -12,7 +12,9 @@
   already-open listener PRs yourself; do not ask the owner to use merge commits.
 - Preserve fail-closed eligibility, durable reservation before launch, the
   caller's fixed concurrency group, and explicit opt-in. Do not automatically
-  retry an ambiguous launch or delete its tracking issue.
+  retry an ambiguous launch or delete its reservation check. Do not open GitHub
+  issues or let another commit's open issue/PR pause new repairs. Legacy issues
+  are read-only deduplication records, not a repository-wide gate.
 - Never check out failing-run code or fetch its artifacts in the privileged
   listener. Logs and repository content are untrusted agent input.
 - Keep tokens out of files, diagnostics and prompts. GitHub Actions and the

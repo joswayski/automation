@@ -39,13 +39,14 @@ function harness(repo = "joswayski/caper") {
     runsTotal: undefined,
     failRunsList: false,
     issues: [],
-    comments: [],
+    checks: [],
+    failChecksList: false,
+    checksTotal: undefined,
     prs: [],
-    labels: [],
     launches: [],
     writes: [],
-    failIssueCreate: false,
-    failIssueUpdate: false,
+    failCheckCreate: false,
+    failCheckUpdate: false,
     launchError: false,
   };
   const options = {
@@ -98,31 +99,36 @@ function harness(repo = "joswayski/caper") {
       }
       if (path === "/git/ref/heads/main") return json({ object: { sha: state.head } });
       if (path === "/issues") return json(page(state.issues));
-      if (path === "/pulls") return json(page(state.prs));
-      if (path === "/labels/amp-ci-repair")
-        return state.labels.length ? json(state.labels[0]) : json({}, 404);
+      if (path === "/pulls") {
+        assert.equal(url.searchParams.get("state"), "all");
+        return json(page(state.prs));
+      }
+      if (path === `/commits/${state.run.head_sha}/check-runs`) {
+        if (state.failChecksList) return json({}, 503);
+        assert.equal(url.searchParams.get("filter"), "all");
+        const checks = state.checks.filter((check) =>
+          check.head_sha === state.run.head_sha && check.name === url.searchParams.get("check_name"),
+        );
+        return json({ check_runs: page(checks), total_count: state.checksTotal ?? checks.length });
+      }
     }
     state.writes.push({ path, method: init.method, body });
-    if (path === "/labels" && init.method === "POST") {
-      state.labels.push(body);
-      return json(body, 201);
-    }
-    if (path === "/issues" && init.method === "POST") {
-      if (state.failIssueCreate) return json({ message: "private diagnostic must not leak" }, 403);
-      const issue = {
+    if (path === "/check-runs" && init.method === "POST") {
+      if (state.failCheckCreate) return json({ message: "private diagnostic must not leak" }, 403);
+      const check = {
         ...body,
-        number: state.issues.length + 1,
-        state: "open",
-        user: { login: "github-actions[bot]" },
-        created_at: now.toISOString(),
+        id: state.checks.length + 1,
+        app: { slug: "github-actions" },
       };
-      state.issues.push(issue);
-      return json(issue, 201);
+      state.checks.push(check);
+      return json(check, 201);
     }
-    if (path.endsWith("/comments") && init.method === "POST") {
-      if (state.failIssueUpdate) return json({}, 503);
-      state.comments.push(body);
-      return json(body, 201);
+    const checkUpdate = path.match(/^\/check-runs\/(\d+)$/);
+    if (checkUpdate && init.method === "PATCH") {
+      if (state.failCheckUpdate) return json({}, 503);
+      const check = state.checks.find((check) => check.id === Number(checkUpdate[1]));
+      Object.assign(check, body);
+      return json(check);
     }
     throw new Error(`Unexpected HTTP request: ${init.method} ${path}`);
   };
@@ -139,13 +145,17 @@ function harness(repo = "joswayski/caper") {
   return { state, options, run: () => repair(options, dependencies) };
 }
 
-test("a failed attempt creates a durable issue and launches the exact Amp project, then suppresses reruns and sibling workflows", async () => {
+test("a failed attempt records a neutral check without creating issues, then suppresses reruns and sibling workflows", async () => {
   const h = harness();
-  assert.deepEqual(await h.run(), { status: "launched", issue: 1, threadURL, agentMode: "high" });
-  assert.match(h.state.issues[0].body, /attempts\/2/);
-  assert.match(h.state.issues[0].body, /Agent mode: `high`/);
-  assert.match(h.state.comments[0].body, /Status: \*\*launched\*\*/);
-  assert.match(h.state.comments[0].body, /ampcode.com\/threads/);
+  assert.deepEqual(await h.run(), { status: "launched", check: 1, threadURL, agentMode: "high" });
+  assert.equal(h.state.checks[0].status, "completed");
+  assert.equal(h.state.checks[0].conclusion, "neutral");
+  assert.equal(h.state.checks[0].external_id, `amp-ci-repair:v1 ${sha}`);
+  assert.equal(h.state.checks[0].details_url, threadURL);
+  assert.match(h.state.checks[0].output.summary, /attempts\/2/);
+  assert.match(h.state.checks[0].output.summary, /Agent mode: `high`/);
+  assert.match(h.state.checks[0].output.title, /launched/);
+  assert.deepEqual(h.state.issues, []);
   assert.equal(h.state.launches[0].project, "josevalerio/caper");
   assert.equal(h.state.launches[0].agentMode, "high");
   assert.match(
@@ -155,8 +165,9 @@ test("a failed attempt creates a durable issue and launches the exact Amp projec
   assert.match(h.state.launches[0].prompt, /owner explicitly authorizes.*squash-merge/);
   assert.match(h.state.launches[0].prompt, /gh pr merge.*--squash.*--match-head-commit/);
   assert.match(h.state.launches[0].prompt, /Never use --admin/);
-  assert.match(h.state.issues[0].body, /automatically squash-merge/);
-  h.state.issues[0].state = "closed";
+  assert.match(h.state.launches[0].prompt, /Do not open or update GitHub issues/);
+  assert.match(h.state.launches[0].prompt, /report the diagnosis in this Amp thread/);
+  assert.doesNotMatch(h.state.launches[0].prompt, /Tracking issue:|Reference Fixes|open tracking issue pauses/);
   h.state.run.run_attempt = 3;
   h.options.event.workflow_run.run_attempt = 3;
   assert.equal((await h.run()).status, "skipped");
@@ -166,7 +177,7 @@ test("a failed attempt creates a durable issue and launches the exact Amp projec
   h.state.run.name = "Native development builds";
   assert.equal((await h.run()).status, "skipped");
   assert.equal(h.state.launches.length, 1);
-  assert.equal(h.state.issues.length, 1);
+  assert.equal(h.state.checks.length, 1);
 });
 
 test("Claude Code can be selected explicitly without reopening an existing reservation", async () => {
@@ -174,14 +185,13 @@ test("Claude Code can be selected explicitly without reopening an existing reser
   h.options.agentMode = "external-agent:claude-code";
   assert.deepEqual(await h.run(), {
     status: "launched",
-    issue: 1,
+    check: 1,
     threadURL,
     agentMode: "external-agent:claude-code",
   });
   assert.equal(h.state.launches[0].agentMode, "external-agent:claude-code");
-  assert.match(h.state.issues[0].body, /Agent mode: `external-agent:claude-code`/);
+  assert.match(h.state.checks[0].output.summary, /Agent mode: `external-agent:claude-code`/);
   h.options.agentMode = "high";
-  h.state.issues[0].state = "closed";
   assert.equal((await h.run()).status, "skipped");
   assert.equal(h.state.launches.length, 1);
 });
@@ -233,7 +243,7 @@ test("a GitHub timeout annotation repairs a cancelled job once, even with ten su
   assert.equal((await h.run()).status, "launched");
   assert.match((await h.run()).reason, /already reserved/);
   assert.equal(h.state.launches.length, 1);
-  assert.equal(h.state.issues.length, 1);
+  assert.equal(h.state.checks.length, 1);
 });
 
 test("cancelled sources and exact-attempt replacements use the same narrow timeout annotation rule", async (t) => {
@@ -525,12 +535,11 @@ test("different deployments at the same infrastructure SHA have separate reserva
   h.state.failRunsList = true; // Push supersession must not apply to dispatches.
   assert.equal((await h.run()).status, "launched");
   assert.equal(h.state.launches[0].project, "josevalerio/infrastructure");
-  assert.match(h.state.issues[0].body, /amp-ci-repair:v1 run-123/);
-  h.state.issues[0].state = "closed";
+  assert.equal(h.state.checks[0].external_id, "amp-ci-repair:v1 run-123");
   h.state.run.id = 124;
   h.options.event.workflow_run.id = 124;
   assert.equal((await h.run()).status, "launched");
-  assert.match(h.state.issues[1].body, /amp-ci-repair:v1 run-124/);
+  assert.equal(h.state.checks[1].external_id, "amp-ci-repair:v1 run-124");
 });
 
 test("explicitly enrolled chained releases are supported without admitting arbitrary workflow_run sources", async () => {
@@ -541,7 +550,7 @@ test("explicitly enrolled chained releases are supported without admitting arbit
     event: "workflow_run",
   });
   assert.equal((await h.run()).status, "launched");
-  assert.match(h.state.issues[0].body, /amp-ci-repair:v1 run-123/);
+  assert.equal(h.state.checks[0].external_id, "amp-ci-repair:v1 run-123");
 });
 
 test("distinct failures, including failed fixes, have no daily cap even with a legacy limit configured", async () => {
@@ -553,24 +562,63 @@ test("distinct failures, including failed fixes, have no daily cap even with a l
     for (let i = 0; i < 12; i++) {
       h.state.run.head_sha = h.state.head = (i + 1).toString(16).padStart(40, "0");
       assert.equal((await h.run()).status, "launched", `failure ${i + 1}`);
-      h.state.issues[i].state = "closed";
     }
     assert.equal(h.state.launches.length, 12);
-    assert.equal(h.state.issues.length, 12);
+    assert.equal(h.state.checks.length, 12);
+    assert.deepEqual(h.state.issues, []);
     assert.match((await h.run()).reason, /already reserved/);
     assert.equal(h.state.launches.length, 12);
   }
 });
 
-test("an open tracking issue pauses newer commits until reviewed; an open repair PR still blocks after issue closure", async () => {
+test("old tracking issues and unrelated open repair PRs do not block a distinct failure", async () => {
   const h = harness();
-  await h.run();
-  h.state.run.head_sha = h.state.head = otherSha;
-  assert.match((await h.run()).reason, /open tracking issue/);
-  h.state.issues[0].state = "closed";
-  h.state.prs = [{ head: { ref: `amp/ci-repair/${sha}` } }];
-  assert.match((await h.run()).reason, /repair PR/);
-  h.state.prs = [];
+  h.state.issues = [{
+    number: 472,
+    state: "open",
+    user: { login: "github-actions[bot]" },
+    body: `<!-- amp-ci-repair:v1 ${otherSha} -->`,
+  }];
+  h.state.prs = [{ head: { ref: `amp/ci-repair/${otherSha}` }, state: "open" }];
+  assert.equal((await h.run()).status, "launched");
+  assert.equal(h.state.issues[0].state, "open");
+  assert.equal(h.state.launches.length, 1);
+});
+
+test("legacy issue reservations and repair PRs of every state still suppress the same commit", async () => {
+  for (const state of ["open", "closed"]) {
+    const h = harness();
+    h.state.issues = [{
+      number: 472, state, user: { login: "github-actions[bot]" },
+      body: `<!-- amp-ci-repair:v1 ${sha} -->`,
+    }];
+    assert.match((await h.run()).reason, /already reserved/);
+    assert.deepEqual(h.state.writes, []);
+    assert.deepEqual(h.state.launches, []);
+    h.state.issues = [];
+    h.state.prs = [{ head: { ref: `amp/ci-repair/${sha}` }, state }];
+    assert.match((await h.run()).reason, /repair PR/);
+    h.state.prs = [{ head: { ref: "renamed" }, body: `<!-- amp-ci-repair:v1 ${sha} -->`, state }];
+    assert.match((await h.run()).reason, /repair PR/);
+    assert.deepEqual(h.state.launches, []);
+  }
+});
+
+test("untrusted checks and issues cannot suppress a repair, and check lookups fail closed", async () => {
+  const h = harness();
+  h.state.checks = [{
+    id: 99, name: `Amp CI repair: ${sha}`, head_sha: sha,
+    external_id: `amp-ci-repair:v1 ${sha}`, app: { slug: "other-app" },
+  }];
+  h.state.issues = [{ user: { login: "someone" }, body: `<!-- amp-ci-repair:v1 ${sha} -->` }];
+  h.state.failChecksList = true;
+  await assert.rejects(h.run(), /503/);
+  assert.deepEqual(h.state.launches, []);
+  h.state.failChecksList = false;
+  h.state.checksTotal = 2;
+  await assert.rejects(h.run(), /incomplete safety check/);
+  assert.deepEqual(h.state.writes, []);
+  h.state.checksTotal = undefined;
   assert.equal((await h.run()).status, "launched");
 });
 
@@ -582,7 +630,7 @@ test("a lost launch response cannot create a second agent and does not leak subp
     assert.doesNotMatch(error.message, /sensitive/);
     return true;
   });
-  assert.match(h.state.comments[0].body, /launch unconfirmed/);
+  assert.match(h.state.checks[0].output.title, /launch unconfirmed/);
   h.options.agentMode = "external-agent:claude-code";
   assert.equal((await h.run()).status, "skipped");
   assert.equal(h.state.launches.length, 1);
@@ -590,19 +638,19 @@ test("a lost launch response cannot create a second agent and does not leak subp
 
 test("failure to record the returned thread leaves the reservation, rather than relaunching", async () => {
   const h = harness();
-  h.state.failIssueUpdate = true;
+  h.state.failCheckUpdate = true;
   await assert.rejects(
     h.run(),
     /Thread created at https:\/\/ampcode.com\/threads\/T-12345678-1234-1234-1234-123456789012/,
   );
-  assert.match(h.state.issues[0].body, /\*\*reserved\*\*/);
+  assert.match(h.state.checks[0].output.title, /reserved/);
   assert.equal((await h.run()).status, "skipped");
   assert.equal(h.state.launches.length, 1);
 });
 
 test("failure to reserve prevents launch", async () => {
   const h = harness();
-  h.state.failIssueCreate = true;
+  h.state.failCheckCreate = true;
   await assert.rejects(h.run(), (error) => {
     assert.match(error.message, /403/);
     assert.doesNotMatch(error.message, /private diagnostic/);
@@ -629,22 +677,30 @@ test("dry run needs no Amp key and makes no writes or launches", async () => {
   assert.deepEqual(h.state.launches, []);
 });
 
-test("safety checks cover all pages of jobs, issues, and repair PRs", async () => {
+test("safety checks cover all pages of jobs, checks, legacy issues, and repair PRs", async () => {
   const h = harness();
   h.state.jobs = [
     ...Array.from({ length: 100 }, () => ({ conclusion: "success" })),
     { conclusion: "timed_out" },
   ];
   await h.run();
-  const reservation = h.state.issues[0];
+  const check = h.state.checks[0];
+  h.state.checks = [
+    ...Array.from({ length: 100 }, () => ({ ...check, app: { slug: "other-app" } })),
+    check,
+  ];
+  assert.match((await h.run()).reason, /already reserved/);
+  h.state.checks = [];
   const unrelated = Array.from({ length: 100 }, () => ({ body: "", user: { login: "someone" } }));
-  h.state.issues = [...unrelated, reservation];
+  h.state.issues = [...unrelated, {
+    number: 472, state: "closed", user: { login: "github-actions[bot]" },
+    body: `<!-- amp-ci-repair:v1 ${sha} -->`,
+  }];
   assert.equal((await h.run()).status, "skipped");
-  reservation.state = "closed";
-  h.state.run.head_sha = h.state.head = otherSha;
+  h.state.issues = [];
   h.state.prs = [
     ...Array.from({ length: 100 }, () => ({ head: { ref: "unrelated" } })),
-    { head: { ref: "amp/ci-repair/previous" } },
+    { head: { ref: `amp/ci-repair/${sha}` }, state: "closed" },
   ];
   assert.match((await h.run()).reason, /repair PR/);
   assert.equal(h.state.launches.length, 1);
@@ -675,11 +731,11 @@ test("listeners pin one shared implementation and carry the serialization, permi
     assert.match(yaml, /enabled: \$\{\{ vars.AMP_REPAIR_ENABLED }}/);
     assert.match(yaml, /agent-mode: \$\{\{ vars.AMP_REPAIR_MODE \|\| 'high' }}/);
     assert.match(yaml, /amp-api-key: \$\{\{ secrets.AMP_API_KEY }}/);
-    assert.match(yaml, /issues: write/);
-    assert.match(yaml, /checks: read/);
+    assert.match(yaml, /issues: read/);
+    assert.match(yaml, /checks: write/);
     assert.doesNotMatch(
       yaml,
-      /checks: write|contents: write|pull-requests: write|actions\/checkout|secrets: inherit|workflow_dispatch:/,
+      /issues: write|contents: write|pull-requests: write|actions\/checkout|secrets: inherit|workflow_dispatch:/,
     );
     for (const workflow of Object.values(policy.workflows))
       assert.ok(yaml.includes(JSON.stringify(workflow.name)));

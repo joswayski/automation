@@ -51,9 +51,10 @@ see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-
   allowed event, `main`, the latest attempt, and failed jobs/steps. A cancelled
   workflow with a failed step or GitHub job execution-time-limit failure annotation
   is eligible; ordinary cancellations are not. Annotation lookups accept only
-  same-repository GitHub API check-run URLs and require `checks: read` in the
-  generated listener. Updating an existing action pin alone does not grant this
-  permission; regenerate its listener too.
+  same-repository GitHub API check-run URLs. The listener requires `checks: write`
+  for its reservation record (which also permits annotation reads). Updating an
+  existing action pin alone does not grant this permission; regenerate its
+  listener too.
 - A push is superseded only by a newer trusted `main` push run of the same
   workflow (ID, file and enrolled name) on a different SHA. Workflow run numbers,
   not rerun timestamps, establish order. Unrelated commits/workflows, dispatches
@@ -70,22 +71,30 @@ see [the recovery procedure](docs/rollout.md#agent-modes-and-manual-claude-code-
   truncated pagination stop before reservation/launch rather than guessing.
 - One reservation per push commit across enrolled workflows, or per non-push run
   across reruns. Deploying two images at one infrastructure SHA uses two run keys.
-- A labelled tracking issue is written **before** installing Amp or launching.
+- A completed **neutral check** is written before installing Amp or launching.
+  It records an attempt, not successful CI or a verified fix, and links to the
+  Amp thread when launched. The listener and agent do not create GitHub issues.
   Lost responses, runner termination, and reruns do not silently create another
   agent. Ambiguous launches require human reconciliation, not automatic retries.
-- One open tracking issue or repair PR pauses new launches in that repository.
-  There is **no daily launch cap**, dollar budget, or agent-runtime limit. Once
-  a repair merges and closes its issue, a new failed fix commit is eligible too.
+- Old tracking issues are read only to suppress the same pre-upgrade attempt;
+  their open/closed state never blocks a different commit/run. Matching repair
+  PRs in any state also suppress duplicates, not unrelated failures.
+- Distinct failures continue even when another repair has no fix or a blocked
+  PR. There is **no daily launch cap**, dollar budget, or agent-runtime limit.
+  A new failed fix commit is eligible too. Agents coordinate related work and
+  revalidate against current main before merging.
   The retired `AMP_REPAIR_DAILY_LIMIT` variable and `daily-limit` input are ignored.
 - Caller concurrency queues up to 100 completions. Events beyond that GitHub
   queue limit can be cancelled. Events skipped while blocked are not
   replayed automatically; this is not a durable backlog of every failure.
 - The listener never checks out failed-run code, downloads build artifacts, or
-  passes its GitHub token to Amp. GitHub permissions are read-only except Issues.
+  passes its GitHub token to Amp. GitHub permissions are read-only except Checks;
+  the listener cannot write issues, code, or PRs.
 - The repair agent merges only its own validated PR using the exact validated
   head SHA, without administrator bypass. An unverified fix or blocked merge
   stays open for human review. Normal main CI runs after the squash merge;
   repair PRs do not run CI. No GitHub repository auto-merge setting is required.
+  Diagnoses that do not justify a PR stay in the Amp thread, not a tracking issue.
 
 The agent's merge and operational restrictions are **instructions, not an authorization
 sandbox**. Orbs inherit the selected Amp project's GitHub access, secrets, and

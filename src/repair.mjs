@@ -55,12 +55,11 @@ function trustedRun(run, repository, policy) {
   );
 }
 
-function promptFor({ repo, run, project, issue, marker, key }) {
+function promptFor({ repo, run, project, marker, key }) {
   return `Investigate a failed trusted default-branch workflow in ${repo} and, if a code fix is justified, implement and locally validate a focused ready-for-review PR. The owner explicitly authorizes you to automatically squash-merge your own validated repair PR without waiting for another approval. This authorization supersedes generic PR-only/no-merge guidance for this repair, but never GitHub branch protection or merge requirements. It does not authorize merging unrelated PRs or running deployment/release commands.
 
 Amp project: ${project}
 Failure: https://github.com/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}
-Tracking issue: https://github.com/${repo}/issues/${issue.number}
 Workflow file: ${run.path}
 Workflow event: ${run.event}
 Workflow head commit: ${run.head_sha}
@@ -73,11 +72,11 @@ For workflow_dispatch or workflow_run, the workflow head commit may be orchestra
 
 Reproduce where practical, fix the cause, and run the repository's local checks. Do not weaken assertions, skip checks, bypass guards, change credentials, or alter runner/production infrastructure to manufacture a green result. Missing credentials, unavailable runners, provider outages, signing problems, and unavailable native toolchains must be reported honestly; do not invent a code fix or equate Linux/mocked validation with an Apple/device build. Do not start or rerun GitHub workflows, including PR CI. If the repo has automatic pull_request workflows, use a [skip ci] commit message to suppress them. Remove all CI-skip directives from the final squash commit's subject AND body so normal main CI runs, including CI that can trigger another repair if this fix fails.
 
-If a fix is warranted, push only the repair branch and open one ready-for-review PR. Include the PR marker, failure link, exact local validation and gaps, and a numbered Deployment order section with operator commands where relevant. Reference Fixes ${repo}#${issue.number} so merging closes the tracking issue. Update the issue with the diagnosis and PR link, but leave it open until the PR merges.
+Do not open or update GitHub issues. If a fix is warranted, push only the repair branch and open one ready-for-review PR. Include the PR marker, failure link, exact local validation and gaps, and a numbered Deployment order section with operator commands where relevant. If another repair PR addresses the same failure, avoid duplicating its work; an unrelated open repair PR is not a reason to stop.
 
-After relevant local checks pass and you have reviewed your diff, automatically squash-merge that PR. Fetch the current default branch first; if it has advanced, incorporate relevant changes and revalidate before merging. Confirm the PR belongs to ${repo}, targets its default branch, uses your repair branch, and contains only your intended fix. Use gh pr merge <PR> --repo ${repo} --squash --match-head-commit <validated-head-sha> --subject '<clean title>' --body '<clean summary>'. Supply the exact head SHA you validated, not a newly changed head. This is an agent-performed merge, not a requirement to enable GitHub's repository auto-merge setting. Never use --admin, bypass required checks/reviews, change repository settings, or push directly to the default branch. If validation fails, the fix cannot be verified, or GitHub blocks the merge, leave the PR and issue open and report the blocker rather than forcing it. Verify the PR is MERGED and its tracking issue is closed before declaring success; close the tracking issue only after confirming the merge if GitHub did not close it automatically.
+After relevant local checks pass and you have reviewed your diff, automatically squash-merge that PR. Fetch the current default branch first; if it has advanced, incorporate relevant changes and revalidate before merging. Confirm the PR belongs to ${repo}, targets its default branch, uses your repair branch, and contains only your intended fix. Use gh pr merge <PR> --repo ${repo} --squash --match-head-commit <validated-head-sha> --subject '<clean title>' --body '<clean summary>'. Supply the exact head SHA you validated, not a newly changed head. This is an agent-performed merge, not a requirement to enable GitHub's repository auto-merge setting. Never use --admin, bypass required checks/reviews, change repository settings, or push directly to the default branch. If validation fails, the fix cannot be verified, or GitHub blocks the merge, leave the PR open and report the blocker in this Amp thread rather than forcing it. Verify the PR is MERGED before declaring success.
 
-Do not manually release, deploy, roll back, apply infrastructure, or rotate secrets. Normal workflows triggered by the merge may build, publish, or deploy according to the repository's existing configuration. If no PR is warranted, post the diagnosis and required human action to the issue and leave it open for review. An open tracking issue pauses further automatic repairs in this repository. There is no daily launch cap: a new failed fix commit can receive its own repair after this issue closes. Never claim a repair has shipped just because a PR exists.`;
+Do not manually release, deploy, roll back, apply infrastructure, or rotate secrets. Normal workflows triggered by the merge may build, publish, or deploy according to the repository's existing configuration. If no PR is warranted, report the diagnosis in this Amp thread; do not create a tracking issue or pause the repository's repair automation. There is no daily launch cap: each new failed commit/run can receive its own repair, including a failed fix commit. Never claim a repair has shipped just because a PR exists.`;
 }
 
 // The caller's fixed concurrency group serializes reservations. Persist before
@@ -163,6 +162,19 @@ export async function repair(
   // Dispatches may deploy different images at the same infrastructure SHA.
   const key = run.event === "push" ? run.head_sha : `run-${run.id}`;
   const marker = `${trackingPrefix}${key} -->`;
+  const checkName = `Amp CI repair: ${key}`;
+  const externalID = `amp-ci-repair:v1 ${key}`;
+  const checks = await github.list(
+    `${base}/commits/${run.head_sha}/check-runs?check_name=${encodeURIComponent(checkName)}&filter=all`,
+    "check_runs",
+  );
+  const reserved = checks.find((check) =>
+    check.app?.slug === "github-actions" && check.external_id === externalID,
+  );
+  if (reserved)
+    return { ...skip("An attempt is already reserved for this commit/run"), check: reserved.id };
+  // Read the old ledger only to avoid duplicating pre-upgrade launches. Its
+  // open/closed state must never block a different commit/run.
   const issues = (
     await github.list(`${base}/issues?state=all&labels=${label}&sort=created&direction=desc`)
   ).filter(
@@ -174,18 +186,16 @@ export async function repair(
   const existing = issues.find((issue) => issue.body.includes(marker));
   if (existing)
     return {
-      ...skip("An attempt is already reserved for this commit/run, even if its issue is closed"),
+      ...skip("An attempt is already reserved for this commit/run in the legacy ledger"),
       issue: existing.number,
     };
-  if (issues.some((issue) => issue.state === "open"))
-    return skip("An open tracking issue needs completion or human review");
-  const prs = await github.list(`${base}/pulls?state=open`);
+  const prs = await github.list(`${base}/pulls?state=all`);
   if (
     prs.some(
-      (pr) => pr.head?.ref?.startsWith("amp/ci-repair/") || pr.body?.includes(trackingPrefix),
+      (pr) => pr.head?.ref === `amp/ci-repair/${key}` || pr.body?.includes(marker),
     )
   )
-    return skip("A repair PR is already open");
+    return skip("A repair PR already exists for this commit/run");
   if (dryRun)
     return {
       status: "would-launch",
@@ -195,61 +205,60 @@ export async function repair(
       agentMode,
     };
 
-  try {
-    await github.call(`${base}/labels/${label}`);
-  } catch (error) {
-    if (error.status !== 404) throw error;
-    await github.call(`${base}/labels`, "POST", {
-      name: label,
-      color: "b64d32",
-      description: "Automatic CI repair reservations; open issues pause further launches",
-    });
-  }
   const runURL = `https://github.com/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}`;
-  const body = `${marker}
+  const summary = `${marker}
 An automatic repair attempt is reserved for [this failed run](${runURL}).
 
 Agent mode: \`${agentMode}\`. There is no automatic mode failover; inspect and stop any existing agent before starting a manual replacement.
 
-Status: **reserved**. See the launch-status comment for the thread link. If no comment appears, the launch may still have started. Do not rerun to create another agent; check Amp first.
+This neutral check records the launch attempt, not successful CI or a verified fix. If no thread link appears, the launch may still have started. Do not rerun to create another agent; check Amp first. Other failed commits/runs remain eligible.
 
-This issue is the durable attempt record. Leave the label and marker intact, including after closing. An open tracking issue blocks further agents in this repository. Closing permits future commits/runs, not another attempt for this key.
-
-The owner authorizes the agent to automatically squash-merge its own repair PR after relevant local checks pass, without bypassing GitHub merge requirements. A merge closes this issue and permits the next distinct failure; there is no daily launch cap. Unverified fixes and blocked merges stay open for human review. The agent must not run release, deployment, or production operations; existing default-branch workflows still run normally after a merge.`;
-  const issue = await github.call(`${base}/issues`, "POST", {
-    title: `[Amp repair] ${run.name}: ${key.slice(0, 20)}`,
-    body,
-    labels: [label],
+The agent opens and automatically squash-merges its own locally validated repair PR without creating GitHub issues or bypassing merge requirements. There is no daily launch cap.`;
+  const check = await github.call(`${base}/check-runs`, "POST", {
+    name: checkName,
+    head_sha: run.head_sha,
+    external_id: externalID,
+    status: "completed",
+    conclusion: "neutral",
+    completed_at: new Date().toISOString(),
+    details_url: runURL,
+    output: { title: "Amp repair reserved", summary },
   });
 
   let threadURL;
   try {
     threadURL = await launch({
       project: policy.project,
-      prompt: promptFor({ repo, run, project: policy.project, issue, marker, key }),
+      prompt: promptFor({ repo, run, project: policy.project, marker, key }),
       title: `CI repair: ${repo} ${key.slice(0, 12)}`,
       agentMode,
     });
     if (!/^https:\/\/ampcode\.com\/threads\/T-[a-f0-9-]{36}$/.test(threadURL))
       throw new Error("Amp did not return a valid thread URL");
   } catch {
-    await github.call(`${base}/issues/${issue.number}/comments`, "POST", {
-      body: "Status: **launch unconfirmed**. Inspect Amp and the Actions run before any manual retry. The reservation is intentionally retained.",
+    await github.call(`${base}/check-runs/${check.id}`, "PATCH", {
+      output: {
+        title: "Amp repair launch unconfirmed",
+        summary: `${summary}\n\nInspect Amp and the Actions run before any manual retry. The reservation is intentionally retained.`,
+      },
     });
     throw new Error(
-      `Amp launch unconfirmed; inspect tracking issue #${issue.number}. No automatic retry will be made.`,
+      `Amp launch unconfirmed; inspect check run ${check.id}. No automatic retry will be made.`,
     );
   }
-  // Append rather than replacing the issue: the agent may already be updating
-  // it. If this fails, retain the reservation and expose only the safe URL.
+  // If the link update fails, retain the reservation and expose only the safe URL.
   try {
-    await github.call(`${base}/issues/${issue.number}/comments`, "POST", {
-      body: `Status: **launched**. [Follow the repair in Amp](${threadURL}).`,
+    await github.call(`${base}/check-runs/${check.id}`, "PATCH", {
+      details_url: threadURL,
+      output: {
+        title: "Amp repair launched",
+        summary: `${summary}\n\n[Follow the repair in Amp](${threadURL}).`,
+      },
     });
   } catch {
     throw new Error(
-      `Thread created at ${threadURL}, but its link could not be added to issue #${issue.number}. Do not relaunch.`,
+      `Thread created at ${threadURL}, but its link could not be added to check run ${check.id}. Do not relaunch.`,
     );
   }
-  return { status: "launched", issue: issue.number, threadURL, agentMode };
+  return { status: "launched", check: check.id, threadURL, agentMode };
 }

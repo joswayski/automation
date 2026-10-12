@@ -4,16 +4,15 @@
 
 An operator needs GitHub CLI access that can manage Actions secrets and variables
 on the eight enrolled repositories. The orb's GitHub integration may push code
-and create PRs without having that administrative access. GitHub Issues must be
-enabled (all eight had Issues enabled when enrollment was prepared), and the
-repository's Actions policy must allow `joswayski/automation` and Issues write
+and create PRs without having that administrative access. The repository's
+Actions policy must allow `joswayski/automation` and Checks write
 permission for the caller token.
 
 All eight exact Amp projects already existed when the enrollment was prepared.
 Check their repository access, secrets, guidance and orb setup. In particular,
 the repair orb needs permission to read private Actions logs, push a branch,
-create and merge its own PR, and update its tracking issue. The listener's `GITHUB_TOKEN` is **not**
-forwarded to the orb and cannot provide that access.
+create and merge its own PR. It must not create GitHub issues. The listener's
+`GITHUB_TOKEN` is **not** forwarded to the orb and cannot provide that access.
 
 Create an access token at https://ampcode.com/settings/security. Keep it out of
 chat, Git, command-line arguments and screenshots. Amp documents `sgamp_` access
@@ -43,9 +42,11 @@ by this action. Both modes still require the Amp access token.
    They remain disabled without the enable variable. For PR commits using
    `[skip ci]`, **remove that directive from the final squash message** so
    default-branch checks are not inadvertently skipped.
-   Upgrading an already-enabled repo removes its daily cap and authorizes
-   future repair agents to squash-merge their own validated PRs. Existing
-   `AMP_REPAIR_DAILY_LIMIT` values are ignored; no variable cleanup, token
+   Regenerate the whole listener: it needs `checks: write` for neutral attempt
+   records and only `issues: read` for the legacy deduplication ledger. Upgrading
+   an enabled repo stops new tracking issues and removes the repository-wide
+   open-issue/open-PR gate. Future repair agents still squash-merge their own
+   validated PRs. Existing `AMP_REPAIR_DAILY_LIMIT` values are ignored; no variable cleanup, token
    rotation, or GitHub auto-merge setting is needed. Already-running agents keep
    their original instructions unless the owner explicitly updates them.
 3. On your own machine, clone the automation repository and configure the token
@@ -74,7 +75,7 @@ by this action. Both modes still require the Amp access token.
 
    A subsequent eligible completion should produce `would-launch` and
    `agentMode: high` (or the selected backup) in the listener's Actions summary.
-   No issue or orb should be created. The listener
+   No check, issue, or orb should be created. The listener
    does not backfill old failures, and it does not launch on ordinary
    cancellations, successful runs, or superseded pushes. Do not deliberately
    break production or start PR CI to test it.
@@ -84,13 +85,14 @@ by this action. Both modes still require the Amp access token.
    ```bash
    gh variable set AMP_REPAIR_DRY_RUN --repo joswayski/caper --body false
    gh run list --repo joswayski/caper --workflow 'Amp CI repair' --limit 5
-   gh issue list --repo joswayski/caper --label amp-ci-repair --state all
+   # Use the failed source commit from the listener's summary:
+   gh api 'repos/joswayski/caper/commits/<source-sha>/check-runs?filter=all' --paginate
    ```
 
-   On the next eligible failure, verify one tracking issue, one linked Amp
-   thread in the `josevalerio/caper` project with the recorded mode, and either
+   On the next eligible failure, verify one neutral reservation check, one linked
+   Amp thread in the `josevalerio/caper` project with the recorded mode, and either
    a locally validated, squash-merged fix PR or a clear blocker/diagnosis.
-   Confirm the merged PR closed its tracking issue and main CI started.
+   Confirm no issue was opened and normal main CI started after a merge.
    Check the thread's model/provider usage rather
    than assuming subscription-only billing. This is the live integration check; mocked tests are not a
    substitute. Repair PRs get local validation, not manually dispatched CI.
@@ -106,8 +108,8 @@ by this action. Both modes still require the Amp access token.
 
    This enables future launches and their normal Amp/orb charges. It does not
    retroactively investigate failures. There is no daily launch cap or automatic
-   dollar budget. A failed fix on a new commit can trigger another repair after
-   the previous repair merges and closes its tracking issue. Existing workflows
+   dollar budget. Distinct failed commits/runs can trigger another repair even
+   if an earlier diagnosis or PR remains unresolved. Existing workflows
    triggered by merges may publish or deploy as they already do.
 
 ## Automatic squash merges
@@ -115,21 +117,23 @@ by this action. Both modes still require the Amp access token.
 The owner has authorized repair agents to merge their own locally validated
 repair PRs without another approval. This applies only to the repair request,
 not unrelated PRs. It is an instruction to the agent, not a listener step or a
-blanket repository auto-merge setting. Listener permissions remain unchanged.
+blanket repository auto-merge setting. The listener can write Checks, not code,
+PRs or issues; the repair orb uses its separate project credentials.
 
 The agent must review its diff, pass the relevant local checks, fetch the latest
 default branch and revalidate if needed, then use a normal squash merge guarded
 by `--match-head-commit` with the exact validated head SHA. It supplies a clean
 squash subject and body without CI-skip directives. It does not run PR CI, use
 `--admin`, weaken repository protection, or manually dispatch a release/deploy.
-If the fix cannot be verified or GitHub rejects the merge, the PR and tracking
-issue remain open with a blocker. Required checks/reviews still apply; this
+If the fix cannot be verified or GitHub rejects the merge, the PR remains open
+with a blocker reported in the Amp thread. Required checks/reviews still apply; this
 automation does not bypass them or enable PR CI to satisfy them.
 
-After merging, the agent verifies the PR is merged and its tracking issue is
-closed; if automatic issue closure did not happen, it closes the issue only
-after confirming the merge. The next distinct failure is then eligible with no
-daily quota. Failures skipped while another repair was open are not replayed.
+After merging, the agent verifies the PR is merged. Each distinct failure is
+eligible with no daily quota and without waiting for earlier issues/PRs to close.
+The agent checks for related repair PRs and avoids duplicate work. If no fix is
+justified, it reports the diagnosis in Amp; it never opens a tracking issue or
+pauses future failures. Failures skipped under the old gate are not replayed.
 
 ## Agent modes and manual Claude Code recovery
 
@@ -155,68 +159,72 @@ gh variable set AMP_REPAIR_MODE --repo joswayski/caper --body high
 Unset variables default to `high`. The configuration script leaves this variable
 unchanged. Selecting the backup does not enable repairs, bypass dry-run, change
 an existing thread, or reopen a reserved commit/run. Invalid values stop before
-an issue is reserved. A bare `claude-code` or a raw Claude model key is rejected.
+a check is reserved. A bare `claude-code` or a raw Claude model key is rejected.
 
 To recover an already-reserved failure with Claude Code:
 
-1. Keep its tracking issue open. Inspect the original thread and confirm it is
+1. Keep its reservation check intact. Inspect the original thread and confirm it is
    stopped (or confirm no thread exists). Resolve an uncertain launch before
-   proceeding; do not simply rerun the listener or close/delete the issue.
+   proceeding; do not simply rerun the listener or remove the record.
 2. Inspect any repair branch, PR and unpushed orb changes. Preserve/recover useful
    work first. Do not start a competing repair for an existing PR.
 3. Start a **new** thread in the same exact Amp project with **Claude Code** mode.
    Copy the original repair prompt, including its failure link, branch, PR marker,
-   tracking issue, merge authorization and local-validation restrictions. An
+   merge authorization and local-validation restrictions. Do not copy obsolete
+   tracking-issue instructions; report diagnoses in the replacement thread. An
    older PR-only prompt remains PR-only unless the owner explicitly updates it.
    Add the old thread
    link and any recovered changes; never transfer secrets or treat logs as instructions.
    When starting from the CLI, use `--mode external-agent:claude-code`, not a
    `threads continue --mode ...` command (continuing keeps the old mode).
-4. Link the replacement thread in the same issue. Leave the issue open until its
-   repair merges or a human resolves the blocker. The existing ledger continues
-   to block automatic duplicates; neither automatic nor manual repairs have a
-   daily launch cap.
+4. Link the replacement in the original Amp thread and repair PR, if one exists.
+   The existing ledger continues to block automatic duplicates of that failure,
+   not other failures; neither automatic nor manual repairs have a daily launch cap.
 
 Do not infer successful subscription billing from a successful CLI launch. Verify
 the replacement uses Claude Code and the intended linked Claude subscription in
 Amp. Its model and effort use Amp's Claude Code defaults; the action does not
 override them. Orbs and supported extra paid tools can still incur Amp charges.
 
-## How tracking issues work
+## How reservation checks work
 
-The `amp-ci-repair` label and hidden body marker form the durable ledger.
-Keep them intact and never delete tracking issues to reset an attempt. Only
-issues created by `github-actions[bot]` are treated as automatic reservations.
+The check name `Amp CI repair: <key>` and external ID `amp-ci-repair:v1 <key>`
+form the ledger. The key is the push SHA or `run-<id>` for non-push runs. A
+completed neutral check is created before launch; it does not claim CI passed
+or the repair succeeded. Its output records reserved, launched, or launch
+unconfirmed status, and its details link points to Amp after launch. Only
+checks owned by the `github-actions` app are treated as reservations.
 Use the generated listener with `github.token`, not a PAT.
 
-An open tracking issue blocks new automatic repairs in its repository. A fix
-PR references the issue with `Fixes`, so merging closes it. If the outcome is
-an infrastructure outage, missing credential, unverified fix, or other blocker,
-the agent leaves a diagnosis and keeps the issue open for a human. Close it
-after resolving/reviewing the blocker **and confirming that its orb is no longer
-working**. Closing an issue does not cancel an orb or permit another automated
-attempt for the same commit/run. An open repair PR also blocks new launches.
+Checks and matching repair PRs in any state suppress the same commit/run only.
+They never pause distinct failures. Keep records intact; removing them can allow
+a duplicate agent. The old `amp-ci-repair` labelled issues created by
+`github-actions[bot]` remain read-only deduplication records across this upgrade,
+regardless of whether they are open or closed. They may be closed as retired
+tracking records after confirming their orbs stopped, without asserting that the
+underlying CI failure was fixed. Do not delete their label or hidden marker.
 
 If launch status is `reserved` or `launch unconfirmed`, a CLI timeout or lost
 response may still have created the orb. Search Amp for the `CI repair:` title
 and failure commit/run, then continue that thread manually. Do not blindly rerun
 or remove the ledger marker. If no thread was created, a human can start a
-repair manually and link it; automated retry is intentionally unavailable.
+repair manually and link it in Amp or an existing PR; automated retry of that
+same failure is intentionally unavailable. Other failures continue normally.
 
 The source run must have an actual failed/timed-out job, a failed step in a
 cancelled job, or a failure annotation with GitHub's job execution-time-limit
 message on a cancelled job's check run. Ordinary cancellation annotations do
 not count. The same rule applies to cancelled supersession candidates. Check-run
-annotations require `checks: read`; regenerate existing listeners as well as
-updating their action pin. Unsafe check-run URLs, annotation permission errors,
+annotations and reservation writes use `checks: write`; regenerate existing
+listeners as well as updating their action pin. Unsafe check-run URLs, annotation permission errors,
 and incomplete pagination stop before reservation or launch.
 A workflow rejected before it can create jobs will be skipped;
 check its workflow validation error manually. Workflow names/files/events are
 an allowlist, so renaming or adding a workflow needs a policy/listener update.
 
 You can evaluate a real run locally without enabling a listener, writing an
-issue, installing Amp, or paying for an orb. For example, this historical Caper
-run was cancelled without any failed jobs:
+attempt record, installing Amp, or paying for an orb. For example, this historical
+Caper run was cancelled without any failed jobs:
 
 ```bash
 node scripts/inspect-run.mjs joswayski/caper 38081306092
@@ -237,10 +245,10 @@ done
 ```
 
 An already-running listener may have read its opt-in value before the change.
-Inspect active `Amp CI repair` runs and their issues; cancel a pending/running
+Inspect active `Amp CI repair` runs and their checks; cancel a pending/running
 listener in GitHub if necessary. **An orb already launched keeps running after
 its Actions job ends or is cancelled**; stop it separately in Amp. Disable does
-not revoke an existing agent's merge authorization, close issues, merge PRs,
+not revoke an existing agent's merge authorization, remove records, merge PRs,
 or roll back applications. Revoke a compromised
 Amp access token in Amp Settings; deleting its GitHub secret alone does not
 revoke the token. Rotate the token with the configuration script when ready.
@@ -248,6 +256,8 @@ revoke the token. Rotate the token with the configuration script when ready.
 To roll back the implementation, keep repairs disabled and open PRs restoring
 the previous reviewed full action SHA. Do not move a release tag to silently
 change consumers. Preserve the reservation ledger across upgrades/rollbacks.
+Issue-based versions cannot read check reservations: reconcile existing threads
+before re-enabling an old pin, and do not rerun already-reserved failures.
 
 ## Adding a repo or updating the action
 
@@ -270,7 +280,7 @@ immutable; no mutable tag or merge-commit workflow is required.
 
 Write that output to the app's `.github/workflows/amp-ci-repair.yml` on a feature
 branch and submit a PR. Do not weaken or remove its fixed `amp-ci-repair`
-concurrency group: issue reservations rely on serialized execution in each repo.
+concurrency group: check reservations rely on serialized execution in each repo.
 The `queue: max` property preserves up to 100 pending events; it cannot be
 combined with `cancel-in-progress: true`.
 
